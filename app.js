@@ -1,0 +1,837 @@
+const STORAGE_KEYS = {
+  records: "slotRecords.v1",
+  masters: "slotMachineMasters.v1"
+};
+
+const state = {
+  records: loadJson(STORAGE_KEYS.records, []),
+  masters: loadJson(STORAGE_KEYS.masters, []),
+  sort: { key: "date", direction: "desc" }
+};
+
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+document.addEventListener("DOMContentLoaded", () => {
+  initializeDates();
+  buildSettingsForm();
+  bindTabs();
+  bindDraftTable();
+  bindRecords();
+  bindSummary();
+  bindRecommendations();
+  bindMasters();
+  addDraftRow();
+  renderAll();
+});
+
+function loadJson(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveJson(key, value) {
+  localStorage.setItem(key, JSON.stringify(value));
+}
+
+function uid(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function initializeDates() {
+  const today = new Date().toISOString().slice(0, 10);
+  $("#inputDate").value = today;
+  $("#recommendDate").value = today;
+}
+
+function bindTabs() {
+  $$(".tab-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      $$(".tab-button").forEach((item) => item.classList.remove("active"));
+      $$(".panel").forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      $(`#tab-${button.dataset.tab}`).classList.add("active");
+    });
+  });
+}
+
+function bindDraftTable() {
+  $("#addRowButton").addEventListener("click", () => addDraftRow());
+  $("#mockReadButton").addEventListener("click", () => addDraftRow({ memo: "画像読み取り後に修正" }));
+  $("#machineInput").addEventListener("input", refreshDraftEvaluations);
+  $("#clearDraftButton").addEventListener("click", () => {
+    $("#draftTable tbody").innerHTML = "";
+    addDraftRow();
+    updateDraftHint();
+  });
+  $("#saveDraftButton").addEventListener("click", saveDraftRows);
+}
+
+function refreshDraftEvaluations() {
+  [...$("#draftTable tbody").children].forEach((row) => updateDraftRow(row));
+}
+
+function addDraftRow(seed = {}) {
+  const row = $("#draftRowTemplate").content.firstElementChild.cloneNode(true);
+  $(".unit", row).value = seed.unit ?? "";
+  $(".games", row).value = seed.games ?? "";
+  $(".bb", row).value = seed.bb ?? "";
+  $(".rb", row).value = seed.rb ?? "";
+  $(".diff", row).value = seed.diff ?? "";
+  $(".row-memo", row).value = seed.memo ?? "";
+  row.addEventListener("input", () => updateDraftRow(row));
+  $(".remove-row", row).addEventListener("click", () => {
+    row.remove();
+    if (!$("#draftTable tbody").children.length) addDraftRow();
+    updateDraftHint();
+  });
+  $("#draftTable tbody").appendChild(row);
+  updateDraftRow(row);
+  updateDraftHint();
+}
+
+function updateDraftRow(row) {
+  const data = getDraftRowData(row);
+  const rates = calculateRates(data.games, data.bb, data.rb);
+  $(".bb-rate", row).textContent = rates.bbText;
+  $(".rb-rate", row).textContent = rates.rbText;
+  $(".total-rate", row).textContent = rates.totalText;
+  const evaluation = evaluateRecord({ ...data, ...rates, machine: $("#machineInput").value.trim() });
+  $(".rating-cell", row).innerHTML = ratingPill(evaluation.rating);
+  row.dataset.evaluation = JSON.stringify(evaluation);
+  updateDraftHint();
+}
+
+function getDraftRowData(row) {
+  return {
+    unit: $(".unit", row).value.trim(),
+    games: numberValue($(".games", row).value),
+    bb: numberValue($(".bb", row).value),
+    rb: numberValue($(".rb", row).value),
+    diff: numberValue($(".diff", row).value),
+    memo: $(".row-memo", row).value.trim()
+  };
+}
+
+function updateDraftHint() {
+  const count = [...$("#draftTable tbody").children].filter((row) => {
+    const data = getDraftRowData(row);
+    return data.unit || data.games || data.bb || data.rb || data.diff || data.memo;
+  }).length;
+  $("#draftHint").textContent = count ? `${count}台を編集中です。保存前に数値を確認してください。` : "台データを入力してください。";
+}
+
+function saveDraftRows() {
+  const date = $("#inputDate").value;
+  const store = $("#storeInput").value.trim();
+  const machine = $("#machineInput").value.trim();
+  const sessionMemo = $("#sessionMemo").value.trim();
+
+  if (!date || !store || !machine) {
+    alert("日付、店舗、機種を入力してください。");
+    return;
+  }
+
+  const rows = [...$("#draftTable tbody").children]
+    .map((row) => ({ row, data: getDraftRowData(row) }))
+    .filter(({ data }) => data.unit || data.games || data.bb || data.rb || data.diff);
+
+  if (!rows.length) {
+    alert("保存する台データを入力してください。");
+    return;
+  }
+
+  rows.forEach(({ row, data }) => {
+    const rates = calculateRates(data.games, data.bb, data.rb);
+    const evaluation = evaluateRecord({ ...data, ...rates, machine });
+    state.records.push({
+      id: uid("record"),
+      date,
+      store,
+      machine,
+      unit: data.unit,
+      games: data.games,
+      bb: data.bb,
+      rb: data.rb,
+      bbRate: rates.bb,
+      rbRate: rates.rb,
+      totalRate: rates.total,
+      diff: data.diff,
+      rating: evaluation.rating || "要確認",
+      expectation: evaluation.expectation || 0,
+      confidence: evaluation.confidence || "低",
+      reason: evaluation.reason || "手動入力データです。",
+      nearestSettings: evaluation.nearestSettings || "-",
+      memo: [sessionMemo, data.memo].filter(Boolean).join(" / "),
+      createdAt: new Date().toISOString()
+    });
+  });
+
+  saveJson(STORAGE_KEYS.records, state.records);
+  $("#draftTable tbody").innerHTML = "";
+  addDraftRow();
+  $("#sessionMemo").value = "";
+  renderAll();
+  alert(`${rows.length}台を保存しました。`);
+}
+
+function calculateRates(games, bb, rb) {
+  const bbRate = games > 0 && bb > 0 ? games / bb : null;
+  const rbRate = games > 0 && rb > 0 ? games / rb : null;
+  const totalRate = games > 0 && bb + rb > 0 ? games / (bb + rb) : null;
+  return {
+    bb: bbRate,
+    rb: rbRate,
+    total: totalRate,
+    bbText: rateText(bbRate),
+    rbText: rateText(rbRate),
+    totalText: rateText(totalRate)
+  };
+}
+
+function rateText(value) {
+  return value ? `1/${value.toFixed(1)}` : "-";
+}
+
+function numberValue(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function bindRecords() {
+  ["filterDate", "filterStore", "filterMachine", "filterUnit", "filterRating", "filterPositive", "filterAOnly"].forEach((id) => {
+    $(`#${id}`).addEventListener("input", renderRecords);
+  });
+  $("#recordsTable thead").addEventListener("click", (event) => {
+    const key = event.target.dataset.sort;
+    if (!key) return;
+    state.sort.direction = state.sort.key === key && state.sort.direction === "asc" ? "desc" : "asc";
+    state.sort.key = key;
+    renderRecords();
+  });
+  $("#exportRecordsButton").addEventListener("click", () => exportCsv("slot-records.csv", recordsToCsv(state.records)));
+  $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
+  $("#deleteAllRecordsButton").addEventListener("click", () => {
+    if (!confirm("保存データをすべて削除しますか？")) return;
+    state.records = [];
+    saveJson(STORAGE_KEYS.records, state.records);
+    renderAll();
+  });
+}
+
+function getFilteredRecords() {
+  const date = $("#filterDate").value;
+  const store = $("#filterStore").value.trim();
+  const machine = $("#filterMachine").value.trim();
+  const unit = $("#filterUnit").value.trim();
+  const rating = $("#filterRating").value;
+  const positive = $("#filterPositive").checked;
+  const aOnly = $("#filterAOnly").checked;
+
+  return state.records.filter((record) => {
+    if (date && record.date !== date) return false;
+    if (store && !record.store.includes(store)) return false;
+    if (machine && !record.machine.includes(machine)) return false;
+    if (unit && !String(record.unit).includes(unit)) return false;
+    if (rating && record.rating !== rating) return false;
+    if (positive && record.diff <= 0) return false;
+    if (aOnly && record.rating !== "A") return false;
+    return true;
+  }).sort((a, b) => compareBySort(a, b));
+}
+
+function compareBySort(a, b) {
+  const key = state.sort.key;
+  const dir = state.sort.direction === "asc" ? 1 : -1;
+  const av = a[key] ?? "";
+  const bv = b[key] ?? "";
+  if (typeof av === "number" || typeof bv === "number") return (Number(av) - Number(bv)) * dir;
+  return String(av).localeCompare(String(bv), "ja") * dir;
+}
+
+function renderRecords() {
+  const tbody = $("#recordsTable tbody");
+  tbody.innerHTML = "";
+  getFilteredRecords().forEach((record) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(record.date)}</td>
+      <td>${escapeHtml(record.store)}</td>
+      <td>${escapeHtml(record.machine)}</td>
+      <td>${escapeHtml(record.unit)}</td>
+      <td>${record.games}</td>
+      <td>${record.bb}/${record.rb}</td>
+      <td>${rateText(record.totalRate)}</td>
+      <td>${formatDiff(record.diff)}</td>
+      <td>${ratingPill(record.rating)}</td>
+      <td>${escapeHtml(record.reason || "")}</td>
+      <td class="row-actions">
+        <button class="secondary icon" data-edit="${record.id}" type="button">編</button>
+        <button class="danger icon" data-delete="${record.id}" type="button">×</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  tbody.onclick = (event) => {
+    const editId = event.target.dataset.edit;
+    const deleteId = event.target.dataset.delete;
+    if (editId) editRecord(editId);
+    if (deleteId) deleteRecord(deleteId);
+  };
+}
+
+function editRecord(id) {
+  const record = state.records.find((item) => item.id === id);
+  if (!record) return;
+  $(".tab-button[data-tab='input']").click();
+  $("#inputDate").value = record.date;
+  $("#storeInput").value = record.store;
+  $("#machineInput").value = record.machine;
+  $("#sessionMemo").value = record.memo || "";
+  $("#draftTable tbody").innerHTML = "";
+  addDraftRow(record);
+  state.records = state.records.filter((item) => item.id !== id);
+  saveJson(STORAGE_KEYS.records, state.records);
+  renderAll();
+}
+
+function deleteRecord(id) {
+  if (!confirm("このデータを削除しますか？")) return;
+  state.records = state.records.filter((item) => item.id !== id);
+  saveJson(STORAGE_KEYS.records, state.records);
+  renderAll();
+}
+
+function bindSummary() {
+  ["summaryGroup", "specialFrom", "specialTo", "specialDay", "specialWeekday", "specialDouble"].forEach((id) => {
+    $(`#${id}`).addEventListener("input", renderSummary);
+  });
+}
+
+function specialFilteredRecords() {
+  const from = $("#specialFrom").value;
+  const to = $("#specialTo").value;
+  const day = Number($("#specialDay").value);
+  const weekday = $("#specialWeekday").value;
+  const double = $("#specialDouble").checked;
+  return state.records.filter((record) => {
+    const date = new Date(`${record.date}T00:00:00`);
+    if (from && record.date < from) return false;
+    if (to && record.date > to) return false;
+    if (day && date.getDate() !== day) return false;
+    if (weekday !== "" && date.getDay() !== Number(weekday)) return false;
+    if (double && !isDoubleDay(date)) return false;
+    return true;
+  });
+}
+
+function isDoubleDay(date) {
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  return month === day || [11, 22].includes(day);
+}
+
+function renderSummary() {
+  const records = specialFilteredRecords();
+  const groupKey = $("#summaryGroup").value;
+  const groups = groupBy(records, (record) => record[groupKey] || "未入力");
+  const cards = $("#summaryCards");
+  cards.innerHTML = "";
+  $("#specialSummary").textContent = buildSpecialSummaryText(records);
+
+  Object.entries(groups).sort(([a], [b]) => a.localeCompare(b, "ja")).forEach(([key, items]) => {
+    const stats = calculateStats(items);
+    const card = document.createElement("article");
+    card.className = "summary-card";
+    card.innerHTML = `
+      <span>${escapeHtml(key)}</span>
+      <strong>${stats.count}台</strong>
+      <p class="muted">平均G ${stats.avgGames} / 合算 ${rateText(stats.avgTotalRate)} / REG ${rateText(stats.avgRbRate)}</p>
+      <p class="muted">平均差枚 ${formatDiff(stats.avgDiff)} / プラス ${stats.positiveRate}% / A ${stats.aCount}台 / B ${stats.bCount}台 / C ${stats.cCount}台</p>
+    `;
+    cards.appendChild(card);
+  });
+
+  const ranking = records
+    .slice()
+    .sort((a, b) => recommendationScore(b) - recommendationScore(a))
+    .slice(0, 10);
+  renderRanking($("#summaryRanking"), ranking.map((record, index) => ({
+    title: `${index + 1}位：${record.unit}番 ${record.machine}`,
+    rating: record.rating,
+    body: `${record.store} / ${record.date} / ${rateText(record.totalRate)} / REG ${rateText(record.rbRate)} / ${formatDiff(record.diff)}。${record.reason || ""}`
+  })));
+}
+
+function buildSpecialSummaryText(records) {
+  const stats = calculateStats(records);
+  const conditions = [];
+  const day = $("#specialDay").value;
+  if (day) conditions.push(`毎月${day}日`);
+  if ($("#specialDouble").checked) conditions.push("ゾロ目日");
+  const weekday = $("#specialWeekday");
+  if (weekday.value !== "") conditions.push(`${weekday.options[weekday.selectedIndex].text}曜日`);
+  return `検索条件：${conditions.join("・") || "全データ"} / 対象件数：${stats.count}件 / A評価：${stats.aCount}件 / 平均合算：${rateText(stats.avgTotalRate)} / 平均REG：${rateText(stats.avgRbRate)} / プラス台割合：${stats.positiveRate}%`;
+}
+
+function calculateStats(records) {
+  const count = records.length;
+  const average = (values) => {
+    const usable = values.filter((value) => Number.isFinite(value) && value > 0);
+    return usable.length ? usable.reduce((sum, value) => sum + value, 0) / usable.length : null;
+  };
+  const plus = records.filter((record) => record.diff > 0).length;
+  return {
+    count,
+    avgGames: count ? Math.round(records.reduce((sum, record) => sum + Number(record.games || 0), 0) / count) : 0,
+    avgBbRate: average(records.map((record) => record.bbRate)),
+    avgRbRate: average(records.map((record) => record.rbRate)),
+    avgTotalRate: average(records.map((record) => record.totalRate)),
+    avgDiff: count ? Math.round(records.reduce((sum, record) => sum + Number(record.diff || 0), 0) / count) : 0,
+    positiveRate: count ? Math.round((plus / count) * 100) : 0,
+    aCount: records.filter((record) => record.rating === "A").length,
+    bCount: records.filter((record) => record.rating === "B").length,
+    cCount: records.filter((record) => record.rating === "C").length
+  };
+}
+
+function bindRecommendations() {
+  $("#makeRecommendButton").addEventListener("click", renderRecommendations);
+}
+
+function renderRecommendations() {
+  const targetDate = $("#recommendDate").value;
+  const store = $("#recommendStore").value.trim();
+  const machine = $("#recommendMachine").value.trim();
+  const target = new Date(`${targetDate}T00:00:00`);
+  const day = target.getDate();
+  const weekday = target.getDay();
+  const double = isDoubleDay(target);
+
+  const base = state.records.filter((record) => {
+    if (store && record.store !== store) return false;
+    if (machine && record.machine !== machine) return false;
+    return true;
+  });
+
+  const byUnit = groupBy(base, (record) => `${record.store}__${record.machine}__${record.unit}`);
+  const candidates = Object.values(byUnit).map((items) => {
+    const latest = items.slice().sort((a, b) => b.date.localeCompare(a.date))[0];
+    let score = 0;
+    const reasons = [];
+    const sameDay = items.filter((record) => new Date(`${record.date}T00:00:00`).getDate() === day);
+    const sameWeekday = items.filter((record) => new Date(`${record.date}T00:00:00`).getDay() === weekday);
+    const sameDouble = double ? items.filter((record) => isDoubleDay(new Date(`${record.date}T00:00:00`))) : [];
+    const aCount = items.filter((record) => record.rating === "A").length;
+    const strongReg = items.filter((record) => record.rbRate && record.rbRate <= 300 && record.games >= 3000).length;
+    const recent = items.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3);
+    const recentDip = recent.some((record) => record.diff < -1000);
+
+    score += sameDay.length * 10 + sameWeekday.length * 4 + sameDouble.length * 8 + aCount * 12 + strongReg * 8;
+    if (recentDip) score += 9;
+    if (latest.rating === "A") score += 6;
+    if (latest.diff < -1000) score += 5;
+
+    if (sameDay.length) reasons.push(`同じ${day}日の履歴が${sameDay.length}件`);
+    if (double && sameDouble.length) reasons.push(`ゾロ目日の履歴あり`);
+    if (aCount) reasons.push(`A評価が${aCount}回`);
+    if (strongReg) reasons.push(`高回転でREGが強い履歴あり`);
+    if (recentDip) reasons.push(`直近で凹み後の候補`);
+
+    return {
+      title: `${latest.unit}番 ${latest.machine}`,
+      rating: score >= 45 ? "A" : score >= 24 ? "B" : "C",
+      body: `${latest.store}。${reasons.join("、") || "履歴は少なめです"}。注意点：過去データに基づく候補で、設定を断定するものではありません。`,
+      score
+    };
+  }).sort((a, b) => b.score - a.score).slice(0, 10);
+
+  renderRanking($("#recommendList"), candidates.length ? candidates : [{
+    title: "候補なし",
+    rating: "要確認",
+    body: "条件に合う保存データがありません。まずは台データを保存してください。"
+  }]);
+}
+
+function bindMasters() {
+  $("#masterForm").addEventListener("submit", saveMaster);
+  $("#resetMasterForm").addEventListener("click", resetMasterForm);
+  $("#exportMastersButton").addEventListener("click", () => exportCsv("slot-machine-masters.csv", mastersToCsv(state.masters)));
+  $("#importMastersInput").addEventListener("change", (event) => importMastersCsv(event.target.files[0]));
+}
+
+function buildSettingsForm() {
+  const grid = $("#settingsGrid");
+  for (let setting = 1; setting <= 6; setting += 1) {
+    const card = document.createElement("div");
+    card.className = "setting-card";
+    card.innerHTML = `
+      <h3>設定${setting}</h3>
+      <div class="mini-grid">
+        <label>BIG確率<input data-setting="${setting}" data-field="big" placeholder="例 240"></label>
+        <label>REG確率<input data-setting="${setting}" data-field="reg" placeholder="例 300"></label>
+        <label>合算確率<input data-setting="${setting}" data-field="total" placeholder="例 135"></label>
+        <label>機械割<input data-setting="${setting}" data-field="payout" placeholder="例 105.5"></label>
+      </div>
+    `;
+    grid.appendChild(card);
+  }
+}
+
+function saveMaster(event) {
+  event.preventDefault();
+  const id = $("#masterId").value || uid("master");
+  const name = $("#masterName").value.trim();
+  if (!name) {
+    alert("機種名を入力してください。");
+    return;
+  }
+
+  const settings = {};
+  $$("[data-setting]").forEach((input) => {
+    settings[input.dataset.setting] ??= {};
+    settings[input.dataset.setting][input.dataset.field] = numberValue(input.value);
+  });
+
+  const master = { id, name, settings, note: $("#masterNote").value.trim() };
+  const index = state.masters.findIndex((item) => item.id === id);
+  if (index >= 0) state.masters[index] = master;
+  else state.masters.push(master);
+
+  saveJson(STORAGE_KEYS.masters, state.masters);
+  resetMasterForm();
+  renderAll();
+}
+
+function resetMasterForm() {
+  $("#masterId").value = "";
+  $("#masterName").value = "";
+  $("#masterNote").value = "";
+  $$("[data-setting]").forEach((input) => input.value = "");
+}
+
+function renderMasters() {
+  const tbody = $("#mastersTable tbody");
+  tbody.innerHTML = "";
+  state.masters.forEach((master) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(master.name)}</td>
+      ${[1, 2, 3, 4, 5, 6].map((setting) => {
+        const data = master.settings?.[setting] || {};
+        return `<td>BIG 1/${data.big || "-"}<br>REG 1/${data.reg || "-"}<br>合算 1/${data.total || "-"}<br>${data.payout || "-"}%</td>`;
+      }).join("")}
+      <td>
+        <button class="secondary icon" data-master-edit="${master.id}" type="button">編</button>
+        <button class="danger icon" data-master-delete="${master.id}" type="button">×</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  tbody.onclick = (event) => {
+    const editId = event.target.dataset.masterEdit;
+    const deleteId = event.target.dataset.masterDelete;
+    if (editId) loadMasterToForm(editId);
+    if (deleteId) deleteMaster(deleteId);
+  };
+}
+
+function loadMasterToForm(id) {
+  const master = state.masters.find((item) => item.id === id);
+  if (!master) return;
+  $("#masterId").value = master.id;
+  $("#masterName").value = master.name;
+  $("#masterNote").value = master.note || "";
+  $$("[data-setting]").forEach((input) => {
+    input.value = master.settings?.[input.dataset.setting]?.[input.dataset.field] || "";
+  });
+}
+
+function deleteMaster(id) {
+  if (!confirm("この機種マスターを削除しますか？")) return;
+  state.masters = state.masters.filter((item) => item.id !== id);
+  saveJson(STORAGE_KEYS.masters, state.masters);
+  renderAll();
+}
+
+function evaluateRecord(record) {
+  if (!record.games || record.games < 1000) {
+    return {
+      rating: "要確認",
+      expectation: 20,
+      confidence: "低",
+      reason: "回転数が少ないため参考評価です。",
+      nearestSettings: "-"
+    };
+  }
+
+  const master = state.masters.find((item) => item.name === record.machine);
+  const confidence = record.games >= 6000 ? "高" : record.games >= 3000 ? "中" : "低";
+  let score = record.games >= 6000 ? 18 : record.games >= 3000 ? 10 : 2;
+  let nearestSettings = "-";
+  let reason = "";
+
+  if (master) {
+    const comparisons = [1, 2, 3, 4, 5, 6].map((setting) => {
+      const data = master.settings?.[setting] || {};
+      const regDiff = diffScore(record.rbRate, data.reg);
+      const totalDiff = diffScore(record.totalRate, data.total);
+      const bigDiff = diffScore(record.bbRate, data.big);
+      return { setting, distance: regDiff * 0.5 + totalDiff * 0.35 + bigDiff * 0.15 };
+    }).filter((item) => Number.isFinite(item.distance)).sort((a, b) => a.distance - b.distance);
+
+    nearestSettings = comparisons.slice(0, 2).map((item) => `設定${item.setting}`).join("〜") || "-";
+    const best = comparisons[0]?.setting || 1;
+    score += best * 8;
+    if (record.rbRate && master.settings?.[5]?.reg && record.rbRate <= master.settings[5].reg) score += 22;
+    if (record.totalRate && master.settings?.[5]?.total && record.totalRate <= master.settings[5].total) score += 16;
+    if (record.bbRate && master.settings?.[4]?.big && record.bbRate <= master.settings[4].big) score += 5;
+    reason = makeEvaluationReason(record, best, nearestSettings, master);
+  } else {
+    if (record.rbRate && record.rbRate <= 300) score += 22;
+    if (record.totalRate && record.totalRate <= 145) score += 14;
+    if (record.bbRate && record.bbRate <= 260) score += 4;
+    reason = "機種マスター未登録のため、一般的なREG・合算の強さで仮評価しています。";
+  }
+
+  if (record.diff > 1000) score += 4;
+  if (record.diff < -1000 && record.rbRate && record.rbRate <= 320) score += 6;
+  if (record.games < 3000) score -= 18;
+  if (record.rbRate && record.rbRate > 420 && record.games >= 3000) score -= 20;
+
+  return {
+    rating: score >= 72 ? "A" : score >= 44 ? "B" : "C",
+    expectation: Math.max(0, Math.min(99, Math.round(score))),
+    confidence,
+    reason,
+    nearestSettings
+  };
+}
+
+function diffScore(actual, target) {
+  if (!actual || !target) return Number.POSITIVE_INFINITY;
+  return Math.abs(actual - target) / target;
+}
+
+function makeEvaluationReason(record, best, nearestSettings, master) {
+  if (record.games >= 6000 && best >= 5) return `累計ゲーム数が6000G以上あり、REG・合算が${nearestSettings}近似のため高評価です。`;
+  if (record.games < 3000) return `数値は見られますが回転数が少ないため参考評価です。近い候補は${nearestSettings}です。`;
+  if (record.totalRate && record.rbRate && master.settings?.[4]?.total && record.totalRate <= master.settings[4].total && record.rbRate > (master.settings?.[4]?.reg || 0)) {
+    return "合算は良い一方でREGがやや弱く、差枚の上振れも考慮が必要です。";
+  }
+  if (record.diff < 0 && best >= 4) return `差枚はマイナスですが、REG・合算は${nearestSettings}近似のため候補に残せます。`;
+  return `REGを重視して比較し、近い設定候補は${nearestSettings}です。`;
+}
+
+function recommendationScore(record) {
+  return (record.rating === "A" ? 80 : record.rating === "B" ? 50 : record.rating === "C" ? 20 : 5)
+    + Number(record.expectation || 0)
+    + (record.games >= 5000 ? 15 : 0)
+    + (record.rbRate && record.rbRate <= 300 ? 18 : 0)
+    + (record.diff > 0 ? 5 : 0);
+}
+
+function renderAll() {
+  renderOptions();
+  renderRecords();
+  renderSummary();
+  renderMasters();
+  $("#storageStatus").textContent = `保存 ${state.records.length}件`;
+}
+
+function renderOptions() {
+  const stores = unique(state.records.map((record) => record.store));
+  const machines = unique([...state.records.map((record) => record.machine), ...state.masters.map((master) => master.name)]);
+  $("#storeList").innerHTML = stores.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+  $("#machineList").innerHTML = machines.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+}
+
+function renderRanking(target, items) {
+  target.innerHTML = "";
+  items.forEach((item) => {
+    const article = document.createElement("article");
+    article.className = "rank-item";
+    article.innerHTML = `
+      <div class="rank-title">
+        <strong>${escapeHtml(item.title)}</strong>
+        ${ratingPill(item.rating)}
+      </div>
+      <p>${escapeHtml(item.body)}</p>
+    `;
+    target.appendChild(article);
+  });
+}
+
+function ratingPill(rating) {
+  const normalized = rating === "A" || rating === "B" || rating === "C" ? rating : "check";
+  return `<span class="rating-pill rating-${normalized}">${escapeHtml(rating || "要確認")}</span>`;
+}
+
+function formatDiff(value) {
+  const number = Number(value || 0);
+  return `${number > 0 ? "+" : ""}${Math.round(number).toLocaleString()}枚`;
+}
+
+function groupBy(items, fn) {
+  return items.reduce((groups, item) => {
+    const key = fn(item);
+    groups[key] ??= [];
+    groups[key].push(item);
+    return groups;
+  }, {});
+}
+
+function unique(items) {
+  return [...new Set(items.filter(Boolean))].sort((a, b) => a.localeCompare(b, "ja"));
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
+  }[char]));
+}
+
+function recordsToCsv(records) {
+  const headers = ["日付", "店舗名", "機種名", "台番号", "累計ゲーム数", "BB回数", "RB回数", "BB確率", "RB確率", "合算確率", "推定差枚", "評価", "高設定期待度", "信頼度", "評価理由", "近い設定候補", "メモ", "登録日時"];
+  const rows = records.map((record) => [
+    record.date, record.store, record.machine, record.unit, record.games, record.bb, record.rb,
+    record.bbRate, record.rbRate, record.totalRate, record.diff, record.rating, record.expectation,
+    record.confidence, record.reason, record.nearestSettings, record.memo, record.createdAt
+  ]);
+  return toCsv([headers, ...rows]);
+}
+
+function mastersToCsv(masters) {
+  const headers = ["機種名"];
+  for (let setting = 1; setting <= 6; setting += 1) {
+    headers.push(`設定${setting}BIG確率`, `設定${setting}REG確率`, `設定${setting}合算確率`, `設定${setting}機械割`);
+  }
+  headers.push("備考");
+  const rows = masters.map((master) => {
+    const row = [master.name];
+    for (let setting = 1; setting <= 6; setting += 1) {
+      const data = master.settings?.[setting] || {};
+      row.push(data.big || "", data.reg || "", data.total || "", data.payout || "");
+    }
+    row.push(master.note || "");
+    return row;
+  });
+  return toCsv([headers, ...rows]);
+}
+
+function toCsv(rows) {
+  return rows.map((row) => row.map((cell) => {
+    const text = String(cell ?? "");
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }).join(",")).join("\n");
+}
+
+function exportCsv(filename, csv) {
+  const blob = new Blob([`\ufeff${csv}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === '"' && quoted && next === '"') {
+      cell += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      row.push(cell);
+      cell = "";
+    } else if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && next === "\n") index += 1;
+      row.push(cell);
+      if (row.some((value) => value !== "")) rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+  row.push(cell);
+  if (row.some((value) => value !== "")) rows.push(row);
+  return rows;
+}
+
+function importRecordsCsv(file) {
+  if (!file) return;
+  file.text().then((text) => {
+    const [, ...rows] = parseCsv(text.replace(/^\ufeff/, ""));
+    rows.forEach((row) => {
+      const record = {
+        id: uid("record"),
+        date: row[0] || "",
+        store: row[1] || "",
+        machine: row[2] || "",
+        unit: row[3] || "",
+        games: numberValue(row[4]),
+        bb: numberValue(row[5]),
+        rb: numberValue(row[6]),
+        bbRate: numberValue(row[7]) || null,
+        rbRate: numberValue(row[8]) || null,
+        totalRate: numberValue(row[9]) || null,
+        diff: numberValue(row[10]),
+        rating: row[11] || "要確認",
+        expectation: numberValue(row[12]),
+        confidence: row[13] || "低",
+        reason: row[14] || "",
+        nearestSettings: row[15] || "-",
+        memo: row[16] || "",
+        createdAt: row[17] || new Date().toISOString()
+      };
+      state.records.push(record);
+    });
+    saveJson(STORAGE_KEYS.records, state.records);
+    renderAll();
+  });
+}
+
+function importMastersCsv(file) {
+  if (!file) return;
+  file.text().then((text) => {
+    const [, ...rows] = parseCsv(text.replace(/^\ufeff/, ""));
+    rows.forEach((row) => {
+      const settings = {};
+      let cursor = 1;
+      for (let setting = 1; setting <= 6; setting += 1) {
+        settings[setting] = {
+          big: numberValue(row[cursor++]),
+          reg: numberValue(row[cursor++]),
+          total: numberValue(row[cursor++]),
+          payout: numberValue(row[cursor++])
+        };
+      }
+      state.masters.push({
+        id: uid("master"),
+        name: row[0] || "",
+        settings,
+        note: row[cursor] || ""
+      });
+    });
+    saveJson(STORAGE_KEYS.masters, state.masters);
+    renderAll();
+  });
+}
