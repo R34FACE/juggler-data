@@ -141,25 +141,20 @@ async function readBasicImages() {
   button.disabled = true;
   let added = 0;
   try {
-    updateUploadStatus("基本データ画像をOCRで読み取り中です...");
+    updateUploadStatus("基本データ画像を高精度モードで読み取り中です...");
     for (const [index, file] of files.entries()) {
-      updateUploadStatus(`基本データ画像を読み取り中です（${index + 1}/${files.length}枚目）...`);
-      const result = await Tesseract.recognize(file, "jpn+eng", {
-        logger: (progress) => {
-          if (progress.status === "recognizing text") {
-            updateUploadStatus(`基本データ画像を読み取り中です（${index + 1}/${files.length}枚目 ${Math.round(progress.progress * 100)}%）...`);
-          }
-        }
-      });
-      const rows = parseBasicDataText(result.data.text);
+      const imageNumber = `${index + 1}/${files.length}枚目`;
+      updateUploadStatus(`基本データ画像を補正中です（${imageNumber}）...`);
+      const ocrResults = await recognizeBasicDataImage(file, imageNumber);
+      const rows = parseBasicDataText(ocrResults.map((result) => result.text).join("\n"));
       if (rows.length && added === 0 && isDraftTableEmpty()) $("#draftTable tbody").innerHTML = "";
       rows.forEach((row) => addDraftRow(row));
       added += rows.length;
     }
     if (added) {
-      updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。数値を確認してください。`);
+      updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。高精度OCRでも誤読はあり得るため、数値を確認してください。`);
     } else {
-      updateUploadStatus("OCRは完了しましたが、台番・累計G・BB・RBを抽出できませんでした。画像を確認して手動入力してください。");
+      updateUploadStatus("OCRは完了しましたが、台番・累計G・BB・RBを抽出できませんでした。明るく正面から撮った画像で再実行するか、手動入力してください。");
     }
   } catch (error) {
     console.error(error);
@@ -169,12 +164,138 @@ async function readBasicImages() {
   }
 }
 
+async function recognizeBasicDataImage(file, imageNumber) {
+  const variants = await createOcrImageVariants(file);
+  const attempts = [
+    { name: "表全体", lang: "jpn+eng", params: { tessedit_pageseg_mode: "6" } },
+    { name: "散在文字", lang: "jpn+eng", params: { tessedit_pageseg_mode: "11" } },
+    { name: "数字優先", lang: "eng", params: { tessedit_pageseg_mode: "6", tessedit_char_whitelist: "0123456789０１２３４５６７８９ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz/.,:-+ 合算合成累計総台番番号確率ゲームG数BBRREG " } }
+  ];
+  const results = [];
+
+  for (const [variantIndex, variant] of variants.entries()) {
+    for (const attempt of attempts) {
+      updateUploadStatus(`基本データ画像を読み取り中です（${imageNumber} / 補正${variantIndex + 1}/${variants.length} / ${attempt.name}）...`);
+      const result = await Tesseract.recognize(variant.source, attempt.lang, {
+        ...attempt.params,
+        preserve_interword_spaces: "1",
+        user_defined_dpi: "300",
+        logger: (progress) => {
+          if (progress.status === "recognizing text") {
+            updateUploadStatus(`基本データ画像を読み取り中です（${imageNumber} / 補正${variantIndex + 1}/${variants.length} / ${attempt.name} ${Math.round(progress.progress * 100)}%）...`);
+          }
+        }
+      });
+      results.push({
+        text: result.data.text,
+        confidence: result.data.confidence || 0,
+        variant: variant.name,
+        attempt: attempt.name
+      });
+    }
+  }
+  return results;
+}
+
+async function createOcrImageVariants(file) {
+  const bitmap = await loadImageBitmap(file);
+  const base = drawScaledImage(bitmap, { scale: 2.4 });
+  const highContrast = enhanceCanvas(base, { contrast: 1.55, brightness: 10, threshold: null, invert: false });
+  const binary = enhanceCanvas(base, { contrast: 1.75, brightness: 18, threshold: 165, invert: false });
+  const sharpened = sharpenCanvas(highContrast);
+  return [
+    { name: "高コントラスト", source: highContrast },
+    { name: "二値化", source: binary },
+    { name: "輪郭強調", source: sharpened }
+  ];
+}
+
+async function loadImageBitmap(file) {
+  if (window.createImageBitmap) return createImageBitmap(file);
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = URL.createObjectURL(file);
+  });
+}
+
+function drawScaledImage(image, { scale }) {
+  const canvas = document.createElement("canvas");
+  const longest = Math.max(image.width, image.height);
+  const targetScale = Math.min(Math.max(scale, 1), 3600 / longest);
+  canvas.width = Math.round(image.width * targetScale);
+  canvas.height = Math.round(image.height * targetScale);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+function enhanceCanvas(source, { contrast, brightness, threshold, invert }) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0);
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  for (let i = 0; i < imageData.data.length; i += 4) {
+    const gray = imageData.data[i] * 0.299 + imageData.data[i + 1] * 0.587 + imageData.data[i + 2] * 0.114;
+    let value = (gray - 128) * contrast + 128 + brightness;
+    value = Math.max(0, Math.min(255, value));
+    if (threshold !== null) value = value >= threshold ? 255 : 0;
+    if (invert) value = 255 - value;
+    imageData.data[i] = value;
+    imageData.data[i + 1] = value;
+    imageData.data[i + 2] = value;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function sharpenCanvas(source) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0);
+  const src = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const dst = ctx.createImageData(src);
+  dst.data.set(src.data);
+  const kernel = [0, -1, 0, -1, 5, -1, 0, -1, 0];
+  const width = canvas.width;
+  const height = canvas.height;
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      for (let channel = 0; channel < 3; channel += 1) {
+        let value = 0;
+        for (let ky = -1; ky <= 1; ky += 1) {
+          for (let kx = -1; kx <= 1; kx += 1) {
+            const weight = kernel[(ky + 1) * 3 + (kx + 1)];
+            const offset = ((y + ky) * width + (x + kx)) * 4 + channel;
+            value += src.data[offset] * weight;
+          }
+        }
+        dst.data[(y * width + x) * 4 + channel] = Math.max(0, Math.min(255, value));
+      }
+      dst.data[(y * width + x) * 4 + 3] = src.data[(y * width + x) * 4 + 3];
+    }
+  }
+
+  ctx.putImageData(dst, 0, 0);
+  return canvas;
+}
+
 function parseBasicDataText(text) {
   const normalized = normalizeOcrText(text);
-  const rows = parseTableLikeOcrRows(normalized);
-  if (rows.length) return rows;
-  const single = parseLabelledOcrBlock(normalized);
-  return single ? [single] : [];
+  const rows = [
+    ...parseTableLikeOcrRows(normalized),
+    ...parseLabelledOcrRows(normalized)
+  ];
+  return dedupeOcrRows(rows);
 }
 
 function normalizeOcrText(text) {
@@ -183,36 +304,69 @@ function normalizeOcrText(text) {
     .replace(/[，、]/g, ",")
     .replace(/[／]/g, "/")
     .replace(/[：]/g, ":")
+    .replace(/[|｜]/g, "1")
+    .replace(/[Oo](?=\d)|(?<=\d)[Oo]/g, "0")
+    .replace(/[Il](?=\d)|(?<=\d)[Il]/g, "1")
     .replace(/BIG/gi, "BB")
     .replace(/REG/gi, "RB")
-    .replace(/合成/g, "合算");
+    .replace(/BAR/gi, "BB")
+    .replace(/合成/g, "合算")
+    .replace(/台\s*(?:No|NO|番号)/gi, "台番号");
 }
 
 function parseTableLikeOcrRows(text) {
-  return text.split(/\n+/).map((line) => {
-    const cleaned = line.replace(/[, ](?=\d{3}(\D|$))/g, "").trim();
-    const numbers = cleaned.match(/\d+(?:\.\d+)?/g)?.map(Number) || [];
-    if (numbers.length < 4 || /日付|店舗|機種|累計|台番.*BB|台番号.*BB/i.test(cleaned)) return null;
-    const [unit, games, bb, rb] = numbers;
-    if (!isLikelyUnitRow(unit, games, bb, rb)) return null;
-    const total = extractRateText(cleaned);
-    return {
-      unit: String(Math.round(unit)),
-      games: Math.round(games),
-      bb: Math.round(bb),
-      rb: Math.round(rb),
-      memo: total ? `OCR合算 ${total}` : "基本データ画像OCR"
-    };
-  }).filter(Boolean);
+  return text.split(/\n+/).flatMap((line) => {
+    const cleaned = cleanOcrLine(line);
+    if (!cleaned || /日付|店舗|機種|累計|台番.*BB|台番号.*BB|項目|合算.*BB/i.test(cleaned)) return [];
+
+    const labelled = parseLabelledOcrLine(cleaned);
+    if (labelled) return [labelled];
+
+    const numbers = extractOcrNumbers(cleaned);
+    if (numbers.length < 4) return [];
+
+    const rows = [];
+    for (let offset = 0; offset <= numbers.length - 4; offset += 1) {
+      const [unit, games, bb, rb] = numbers.slice(offset, offset + 4);
+      if (isLikelyUnitRow(unit, games, bb, rb)) {
+        const total = extractRateText(cleaned);
+        rows.push(toOcrRow(unit, games, bb, rb, total));
+        break;
+      }
+    }
+    return rows;
+  });
 }
 
-function parseLabelledOcrBlock(text) {
-  const unit = readLabelNumber(text, ["台番", "台番号", "台No", "No"]);
-  const games = readLabelNumber(text, ["累計ゲーム", "累計G", "ゲーム", "総ゲーム", "G数"]);
-  const bb = readLabelNumber(text, ["BB", "B B"]);
-  const rb = readLabelNumber(text, ["RB", "R B"]);
+function parseLabelledOcrRows(text) {
+  const blocks = text.split(/\n{2,}|(?=台番号|台番|No\.?\s*\d)/i);
+  return blocks.map(parseLabelledOcrLine).filter(Boolean);
+}
+
+function parseLabelledOcrLine(text) {
+  const unit = readLabelNumber(text, ["台番号", "台番", "台No", "No"]);
+  const games = readLabelNumber(text, ["累計ゲーム", "累計G", "総ゲーム", "ゲーム", "G数", "総G"]);
+  const bb = readLabelNumber(text, ["BB", "B B", "BIG"]);
+  const rb = readLabelNumber(text, ["RB", "R B", "REG"]);
   if (!isLikelyUnitRow(unit, games, bb, rb)) return null;
   const total = readLabelRate(text, ["合算確率", "合成確率", "合算", "総合確率"]);
+  return toOcrRow(unit, games, bb, rb, total);
+}
+
+function cleanOcrLine(line) {
+  return line
+    .replace(/[, ](?=\d{3}(\D|$))/g, "")
+    .replace(/[\t ]+/g, " ")
+    .trim();
+}
+
+function extractOcrNumbers(text) {
+  return (text.match(/[+-]?\d+(?:\.\d+)?/g) || [])
+    .map((value) => numberValue(value.replace(/,/g, "")))
+    .filter((value) => Number.isFinite(value));
+}
+
+function toOcrRow(unit, games, bb, rb, total) {
   return {
     unit: String(Math.round(unit)),
     games: Math.round(games),
@@ -222,9 +376,18 @@ function parseLabelledOcrBlock(text) {
   };
 }
 
+function dedupeOcrRows(rows) {
+  const byKey = new Map();
+  rows.forEach((row) => {
+    const key = `${row.unit}-${row.games}-${row.bb}-${row.rb}`;
+    if (!byKey.has(key)) byKey.set(key, row);
+  });
+  return [...byKey.values()].sort((a, b) => Number(a.unit) - Number(b.unit));
+}
+
 function readLabelNumber(text, labels) {
   for (const label of labels) {
-    const pattern = new RegExp(`${label}[^0-9]{0,12}(\\d[\\d,]*)`, "i");
+    const pattern = new RegExp(`${label}[^0-9]{0,16}([+-]?\\d[\\d,]*)`, "i");
     const match = text.match(pattern);
     if (match) return numberValue(match[1].replace(/,/g, ""));
   }
@@ -233,7 +396,7 @@ function readLabelNumber(text, labels) {
 
 function readLabelRate(text, labels) {
   for (const label of labels) {
-    const pattern = new RegExp(`${label}[^0-9/]{0,12}(1\\s*/\\s*\\d+(?:\\.\\d+)?)`, "i");
+    const pattern = new RegExp(`${label}[^0-9/]{0,16}(1\\s*/\\s*\\d+(?:\\.\\d+)?)`, "i");
     const match = text.match(pattern);
     if (match) return match[1].replace(/\s+/g, "");
   }
@@ -247,7 +410,8 @@ function extractRateText(text) {
 
 function isLikelyUnitRow(unit, games, bb, rb) {
   return Number.isFinite(unit) && Number.isFinite(games) && Number.isFinite(bb) && Number.isFinite(rb)
-    && unit > 0 && games > 0 && bb >= 0 && rb >= 0 && games >= bb + rb;
+    && unit > 0 && unit < 10000 && games > 0 && games < 200000
+    && bb >= 0 && bb < 1000 && rb >= 0 && rb < 1000 && games >= bb + rb;
 }
 
 function refreshDraftEvaluations() {
