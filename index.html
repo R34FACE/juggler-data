@@ -35,10 +35,22 @@
           日付
           <input type="date" id="inputDate" required>
         </label>
-        <label>
+        <label class="store-field">
           店舗
-          <input id="storeInput" list="storeList" placeholder="例：○○ホール" required>
+          <div class="store-entry">
+            <input id="storeInput" list="storeList" placeholder="例：○○ホール" required>
+            <button class="secondary" id="saveStoreButton" type="button">保存</button>
+          </div>
           <datalist id="storeList"></datalist>
+        </label>
+        <label>
+          保存店舗
+          <div class="store-entry">
+            <select id="storeSelect">
+              <option value="">店舗を選択</option>
+            </select>
+            <button class="danger subtle" id="deleteStoreButton" type="button">削除</button>
+          </div>
         </label>
         <label>
           機種
@@ -54,17 +66,18 @@
       <div class="upload-grid">
         <label class="upload-box">
           <span>基本データ画像</span>
-          <input type="file" id="basicImage" accept="image/*">
-          <small>第3段階でOCR対応予定。今は手動入力で利用できます。</small>
+          <input type="file" id="basicImage" accept="image/*" multiple>
+          <small>複数枚の基本データ画像から、台番・累計G・BB・RB・合算をOCRで読み取ります。</small>
         </label>
         <label class="upload-box">
           <span>グラフ画像</span>
-          <input type="file" id="graphImage" accept="image/*">
-          <small>第3段階で推定差枚の読み取りを追加しやすい枠です。</small>
+          <input type="file" id="graphImage" accept="image/*" multiple>
+          <small>複数枚のグラフ画像を保存前の確認資料としてアップロードできます。</small>
         </label>
       </div>
 
       <div class="action-row">
+        <button class="secondary" id="readBasicImagesButton" type="button">基本データ画像を読み取り</button>
         <button class="secondary" id="mockReadButton" type="button">読み取り枠を追加</button>
         <button id="addRowButton" type="button">台を追加</button>
         <button class="danger subtle" id="clearDraftButton" type="button">入力をクリア</button>
@@ -90,6 +103,8 @@
           <tbody></tbody>
         </table>
       </div>
+
+      <div class="upload-status" id="uploadStatus">画像は未選択です。</div>
 
       <div class="save-bar">
         <div id="draftHint">台データを入力してください。</div>
@@ -260,6 +275,7 @@
     </tr>
   </template>
 
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

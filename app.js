@@ -1,11 +1,13 @@
 const STORAGE_KEYS = {
   records: "slotRecords.v1",
-  masters: "slotMachineMasters.v1"
+  masters: "slotMachineMasters.v1",
+  stores: "slotStores.v1"
 };
 
 const state = {
   records: loadJson(STORAGE_KEYS.records, []),
   masters: loadJson(STORAGE_KEYS.masters, []),
+  stores: loadJson(STORAGE_KEYS.stores, []),
   sort: { key: "date", direction: "desc" }
 };
 
@@ -17,6 +19,8 @@ document.addEventListener("DOMContentLoaded", () => {
   buildSettingsForm();
   bindTabs();
   bindDraftTable();
+  bindStores();
+  bindImageUploads();
   bindRecords();
   bindSummary();
   bindRecommendations();
@@ -70,6 +74,182 @@ function bindDraftTable() {
   $("#saveDraftButton").addEventListener("click", saveDraftRows);
 }
 
+function bindStores() {
+  $("#saveStoreButton").addEventListener("click", () => {
+    const store = $("#storeInput").value.trim();
+    if (!store) {
+      alert("保存する店舗名を入力してください。");
+      return;
+    }
+    saveStoreName(store);
+    $("#storeSelect").value = store;
+    alert(`店舗「${store}」を保存しました。`);
+  });
+
+  $("#storeSelect").addEventListener("change", (event) => {
+    if (event.target.value) $("#storeInput").value = event.target.value;
+  });
+
+  $("#deleteStoreButton").addEventListener("click", () => {
+    const selected = $("#storeSelect").value;
+    if (!selected) {
+      alert("削除する店舗をプルダウンから選択してください。");
+      return;
+    }
+    if (!confirm(`店舗「${selected}」をプルダウンから削除しますか？保存済みデータは削除されません。`)) return;
+    state.stores = state.stores.filter((store) => store !== selected);
+    saveJson(STORAGE_KEYS.stores, state.stores);
+    if ($("#storeInput").value === selected) $("#storeInput").value = "";
+    renderOptions();
+  });
+}
+
+function saveStoreName(store) {
+  const trimmed = String(store || "").trim();
+  if (!trimmed) return;
+  state.stores = unique([...state.stores, trimmed]);
+  saveJson(STORAGE_KEYS.stores, state.stores);
+  renderOptions();
+}
+
+function bindImageUploads() {
+  ["basicImage", "graphImage"].forEach((id) => {
+    $(`#${id}`).addEventListener("change", updateUploadStatus);
+  });
+  $("#readBasicImagesButton").addEventListener("click", readBasicImages);
+  updateUploadStatus();
+}
+
+function updateUploadStatus(message) {
+  const basicCount = $("#basicImage")?.files.length || 0;
+  const graphCount = $("#graphImage")?.files.length || 0;
+  $("#uploadStatus").textContent = message || `基本データ画像 ${basicCount}枚 / グラフ画像 ${graphCount}枚を選択中です。`;
+}
+
+async function readBasicImages() {
+  const files = [...$("#basicImage").files];
+  if (!files.length) {
+    alert("読み取る基本データ画像を選択してください。");
+    return;
+  }
+  if (!window.Tesseract) {
+    alert("OCRライブラリを読み込めませんでした。ネットワーク接続後に再読み込みしてください。");
+    return;
+  }
+
+  const button = $("#readBasicImagesButton");
+  button.disabled = true;
+  let added = 0;
+  try {
+    updateUploadStatus("基本データ画像をOCRで読み取り中です...");
+    for (const [index, file] of files.entries()) {
+      updateUploadStatus(`基本データ画像を読み取り中です（${index + 1}/${files.length}枚目）...`);
+      const result = await Tesseract.recognize(file, "jpn+eng", {
+        logger: (progress) => {
+          if (progress.status === "recognizing text") {
+            updateUploadStatus(`基本データ画像を読み取り中です（${index + 1}/${files.length}枚目 ${Math.round(progress.progress * 100)}%）...`);
+          }
+        }
+      });
+      const rows = parseBasicDataText(result.data.text);
+      if (rows.length && added === 0 && isDraftTableEmpty()) $("#draftTable tbody").innerHTML = "";
+      rows.forEach((row) => addDraftRow(row));
+      added += rows.length;
+    }
+    if (added) {
+      updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。数値を確認してください。`);
+    } else {
+      updateUploadStatus("OCRは完了しましたが、台番・累計G・BB・RBを抽出できませんでした。画像を確認して手動入力してください。");
+    }
+  } catch (error) {
+    console.error(error);
+    updateUploadStatus("OCR読み取り中にエラーが発生しました。画像を確認して再実行してください。");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function parseBasicDataText(text) {
+  const normalized = normalizeOcrText(text);
+  const rows = parseTableLikeOcrRows(normalized);
+  if (rows.length) return rows;
+  const single = parseLabelledOcrBlock(normalized);
+  return single ? [single] : [];
+}
+
+function normalizeOcrText(text) {
+  return String(text || "")
+    .replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
+    .replace(/[，、]/g, ",")
+    .replace(/[／]/g, "/")
+    .replace(/[：]/g, ":")
+    .replace(/BIG/gi, "BB")
+    .replace(/REG/gi, "RB")
+    .replace(/合成/g, "合算");
+}
+
+function parseTableLikeOcrRows(text) {
+  return text.split(/\n+/).map((line) => {
+    const cleaned = line.replace(/[, ](?=\d{3}(\D|$))/g, "").trim();
+    const numbers = cleaned.match(/\d+(?:\.\d+)?/g)?.map(Number) || [];
+    if (numbers.length < 4 || /日付|店舗|機種|累計|台番.*BB|台番号.*BB/i.test(cleaned)) return null;
+    const [unit, games, bb, rb] = numbers;
+    if (!isLikelyUnitRow(unit, games, bb, rb)) return null;
+    const total = extractRateText(cleaned);
+    return {
+      unit: String(Math.round(unit)),
+      games: Math.round(games),
+      bb: Math.round(bb),
+      rb: Math.round(rb),
+      memo: total ? `OCR合算 ${total}` : "基本データ画像OCR"
+    };
+  }).filter(Boolean);
+}
+
+function parseLabelledOcrBlock(text) {
+  const unit = readLabelNumber(text, ["台番", "台番号", "台No", "No"]);
+  const games = readLabelNumber(text, ["累計ゲーム", "累計G", "ゲーム", "総ゲーム", "G数"]);
+  const bb = readLabelNumber(text, ["BB", "B B"]);
+  const rb = readLabelNumber(text, ["RB", "R B"]);
+  if (!isLikelyUnitRow(unit, games, bb, rb)) return null;
+  const total = readLabelRate(text, ["合算確率", "合成確率", "合算", "総合確率"]);
+  return {
+    unit: String(Math.round(unit)),
+    games: Math.round(games),
+    bb: Math.round(bb),
+    rb: Math.round(rb),
+    memo: total ? `OCR合算 ${total}` : "基本データ画像OCR"
+  };
+}
+
+function readLabelNumber(text, labels) {
+  for (const label of labels) {
+    const pattern = new RegExp(`${label}[^0-9]{0,12}(\\d[\\d,]*)`, "i");
+    const match = text.match(pattern);
+    if (match) return numberValue(match[1].replace(/,/g, ""));
+  }
+  return 0;
+}
+
+function readLabelRate(text, labels) {
+  for (const label of labels) {
+    const pattern = new RegExp(`${label}[^0-9/]{0,12}(1\\s*/\\s*\\d+(?:\\.\\d+)?)`, "i");
+    const match = text.match(pattern);
+    if (match) return match[1].replace(/\s+/g, "");
+  }
+  return extractRateText(text);
+}
+
+function extractRateText(text) {
+  const match = text.match(/1\s*\/\s*\d+(?:\.\d+)?/);
+  return match ? match[0].replace(/\s+/g, "") : "";
+}
+
+function isLikelyUnitRow(unit, games, bb, rb) {
+  return Number.isFinite(unit) && Number.isFinite(games) && Number.isFinite(bb) && Number.isFinite(rb)
+    && unit > 0 && games > 0 && bb >= 0 && rb >= 0 && games >= bb + rb;
+}
+
 function refreshDraftEvaluations() {
   [...$("#draftTable tbody").children].forEach((row) => updateDraftRow(row));
 }
@@ -117,11 +297,17 @@ function getDraftRowData(row) {
 }
 
 function updateDraftHint() {
-  const count = [...$("#draftTable tbody").children].filter((row) => {
-    const data = getDraftRowData(row);
-    return data.unit || data.games || data.bb || data.rb || data.diff || data.memo;
-  }).length;
+  const count = [...$("#draftTable tbody").children].filter((row) => !isDraftRowEmpty(row)).length;
   $("#draftHint").textContent = count ? `${count}台を編集中です。保存前に数値を確認してください。` : "台データを入力してください。";
+}
+
+function isDraftTableEmpty() {
+  return [...$("#draftTable tbody").children].every((row) => isDraftRowEmpty(row));
+}
+
+function isDraftRowEmpty(row) {
+  const data = getDraftRowData(row);
+  return !(data.unit || data.games || data.bb || data.rb || data.diff || data.memo);
 }
 
 function saveDraftRows() {
@@ -143,6 +329,8 @@ function saveDraftRows() {
     alert("保存する台データを入力してください。");
     return;
   }
+
+  saveStoreName(store);
 
   rows.forEach(({ row, data }) => {
     const rates = calculateRates(data.games, data.bb, data.rb);
@@ -645,9 +833,10 @@ function renderAll() {
 }
 
 function renderOptions() {
-  const stores = unique(state.records.map((record) => record.store));
+  const stores = unique(state.stores);
   const machines = unique([...state.records.map((record) => record.machine), ...state.masters.map((master) => master.name)]);
   $("#storeList").innerHTML = stores.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+  $("#storeSelect").innerHTML = `<option value="">店舗を選択</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
   $("#machineList").innerHTML = machines.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
 }
 

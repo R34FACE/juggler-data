@@ -466,3 +466,31 @@ main {
     min-width: 900px;
   }
 }
+
+.store-entry {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.store-entry button {
+  min-width: 72px;
+}
+
+.upload-status {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.6;
+  margin-top: 12px;
+  padding: 10px 12px;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
