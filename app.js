@@ -145,14 +145,19 @@ async function readBasicImages() {
     for (const [index, file] of files.entries()) {
       const imageNumber = `${index + 1}/${files.length}枚目`;
       updateUploadStatus(`基本データ画像を補正中です（${imageNumber}）...`);
-      const ocrResults = await recognizeBasicDataImage(file, imageNumber);
-      const rows = parseBasicDataText(ocrResults.map((result) => result.text).join("\n"));
+      const tableRows = await recognizeBasicDataTableImage(file, imageNumber);
+      let rows = tableRows;
+      if (!rows.length) {
+        updateUploadStatus(`表分割で抽出できなかったため、従来OCRへ切り替えます（${imageNumber}）...`);
+        const ocrResults = await recognizeBasicDataImage(file, imageNumber);
+        rows = parseBasicDataText(ocrResults.map((result) => result.text).join("\n"));
+      }
       if (rows.length && added === 0 && isDraftTableEmpty()) $("#draftTable tbody").innerHTML = "";
       rows.forEach((row) => addDraftRow(row));
       added += rows.length;
     }
     if (added) {
-      updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。高精度OCRでも誤読はあり得るため、数値を確認してください。`);
+      updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。表セル単位で読み取り、合算はBB+RBから再計算しています。要確認の行は保存前に修正してください。`);
     } else {
       updateUploadStatus("OCRは完了しましたが、台番・累計G・BB・RBを抽出できませんでした。明るく正面から撮った画像で再実行するか、手動入力してください。");
     }
@@ -162,6 +167,266 @@ async function readBasicImages() {
   } finally {
     button.disabled = false;
   }
+}
+
+
+async function recognizeBasicDataTableImage(file, imageNumber) {
+  updateUploadStatus(`基本データ画像の表を検出中です（${imageNumber}）...`);
+  const bitmap = await loadImageBitmap(file);
+  const source = drawScaledImage(bitmap, { scale: 2.8 });
+  const tableCanvas = enhanceCanvas(source, { contrast: 1.85, brightness: 14, threshold: 180, invert: false });
+  const layout = detectTableLayout(tableCanvas);
+  const rows = [];
+
+  for (const [rowIndex, rowCells] of layout.rows.entries()) {
+    updateUploadStatus(`表セルを数字専用OCRで読み取り中です（${imageNumber} / ${rowIndex + 1}/${layout.rows.length}行）...`);
+    const cellResults = await Promise.all(rowCells.map((cell, columnIndex) => recognizeNumericCell(tableCanvas, cell, `${imageNumber} 行${rowIndex + 1} 列${columnIndex + 1}`)));
+    const row = buildOcrRowFromCells(cellResults, rowIndex);
+    if (row) rows.push(row);
+  }
+
+  return dedupeOcrRows(rows);
+}
+
+function detectTableLayout(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const darkMap = makeDarkMap(imageData, 120);
+  const bounds = findContentBounds(darkMap, canvas.width, canvas.height);
+  const horizontalLines = findProjectionLines(darkMap, canvas.width, canvas.height, "horizontal", bounds, 0.42);
+  const verticalLines = findProjectionLines(darkMap, canvas.width, canvas.height, "vertical", bounds, 0.32);
+  const rowBands = makeBandsFromLines(horizontalLines, bounds.top, bounds.bottom, 26).filter((band) => band.bottom - band.top >= 18);
+  const columnBands = makeColumnBands(verticalLines, bounds);
+  const dataRows = dropHeaderLikeBand(rowBands, columnBands, darkMap, canvas.width);
+
+  return {
+    bounds,
+    rows: dataRows.map((rowBand) => columnBands.map((columnBand) => padRect({
+      left: columnBand.left,
+      right: columnBand.right,
+      top: rowBand.top,
+      bottom: rowBand.bottom
+    }, -3, canvas.width, canvas.height)))
+  };
+}
+
+function makeDarkMap(imageData, threshold) {
+  const map = new Uint8Array(imageData.width * imageData.height);
+  for (let i = 0; i < imageData.data.length; i += 4) {
+    const gray = imageData.data[i] * 0.299 + imageData.data[i + 1] * 0.587 + imageData.data[i + 2] * 0.114;
+    map[i / 4] = gray < threshold ? 1 : 0;
+  }
+  return map;
+}
+
+function findContentBounds(darkMap, width, height) {
+  const xCounts = Array(width).fill(0);
+  const yCounts = Array(height).fill(0);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (!darkMap[y * width + x]) continue;
+      xCounts[x] += 1;
+      yCounts[y] += 1;
+    }
+  }
+  const xThreshold = Math.max(2, height * 0.004);
+  const yThreshold = Math.max(2, width * 0.004);
+  const left = firstIndexAbove(xCounts, xThreshold, 0) ?? 0;
+  const right = lastIndexAbove(xCounts, xThreshold, width - 1) ?? width - 1;
+  const top = firstIndexAbove(yCounts, yThreshold, 0) ?? 0;
+  const bottom = lastIndexAbove(yCounts, yThreshold, height - 1) ?? height - 1;
+  return padRect({ left, right, top, bottom }, 8, width, height);
+}
+
+function firstIndexAbove(values, threshold, fallback) {
+  const index = values.findIndex((value) => value >= threshold);
+  return index >= 0 ? index : fallback;
+}
+
+function lastIndexAbove(values, threshold, fallback) {
+  for (let i = values.length - 1; i >= 0; i -= 1) {
+    if (values[i] >= threshold) return i;
+  }
+  return fallback;
+}
+
+function findProjectionLines(darkMap, width, height, direction, bounds, ratio) {
+  const length = direction === "horizontal" ? height : width;
+  const span = direction === "horizontal" ? bounds.right - bounds.left + 1 : bounds.bottom - bounds.top + 1;
+  const counts = Array(length).fill(0);
+  if (direction === "horizontal") {
+    for (let y = bounds.top; y <= bounds.bottom; y += 1) {
+      for (let x = bounds.left; x <= bounds.right; x += 1) counts[y] += darkMap[y * width + x];
+    }
+  } else {
+    for (let x = bounds.left; x <= bounds.right; x += 1) {
+      for (let y = bounds.top; y <= bounds.bottom; y += 1) counts[x] += darkMap[y * width + x];
+    }
+  }
+  const threshold = Math.max(8, span * ratio);
+  const lines = [];
+  let start = null;
+  for (let i = 0; i < counts.length; i += 1) {
+    if (counts[i] >= threshold && start === null) start = i;
+    if ((counts[i] < threshold || i === counts.length - 1) && start !== null) {
+      const end = counts[i] < threshold ? i - 1 : i;
+      lines.push(Math.round((start + end) / 2));
+      start = null;
+    }
+  }
+  return mergeCloseNumbers(lines, 7);
+}
+
+function makeBandsFromLines(lines, min, max, minSize) {
+  const guides = [min, ...lines.filter((line) => line > min + 3 && line < max - 3), max];
+  const bands = [];
+  for (let i = 0; i < guides.length - 1; i += 1) {
+    const top = guides[i] + (i === 0 ? 0 : 2);
+    const bottom = guides[i + 1] - (i === guides.length - 2 ? 0 : 2);
+    if (bottom - top >= minSize) bands.push({ top, bottom });
+  }
+  if (bands.length >= 2) return bands;
+  return splitEvenly(min, max, Math.max(2, Math.round((max - min) / 68))).map(([top, bottom]) => ({ top, bottom }));
+}
+
+function makeColumnBands(verticalLines, bounds) {
+  const detected = makeBandsFromLines(verticalLines, bounds.left, bounds.right, 22)
+    .filter((band) => band.bottom - band.top >= 22)
+    .map((band) => ({ left: band.top, right: band.bottom }));
+  if (detected.length >= 5) return chooseTargetColumns(detected, bounds);
+  return splitEvenly(bounds.left, bounds.right, 5).map(([left, right]) => ({ left, right }));
+}
+
+function chooseTargetColumns(columns, bounds) {
+  if (columns.length === 5) return columns;
+  const widths = columns.map((column) => column.right - column.left);
+  const medianWidth = [...widths].sort((a, b) => a - b)[Math.floor(widths.length / 2)] || 1;
+  const candidates = columns.filter((column) => column.right - column.left >= medianWidth * 0.45);
+  return candidates.length >= 5 ? candidates.slice(0, 5) : splitEvenly(bounds.left, bounds.right, 5).map(([left, right]) => ({ left, right }));
+}
+
+function dropHeaderLikeBand(rowBands, columnBands, darkMap, width) {
+  if (rowBands.length <= 1) return rowBands;
+  const [first, ...rest] = rowBands;
+  const digitDensity = columnBands.reduce((total, column) => total + countDarkPixels(darkMap, width, {
+    left: column.left,
+    right: column.right,
+    top: first.top,
+    bottom: first.bottom
+  }), 0) / Math.max(1, columnBands.reduce((total, column) => total + (column.right - column.left + 1) * (first.bottom - first.top + 1), 0));
+  return digitDensity > 0.23 ? rowBands : rest;
+}
+
+function countDarkPixels(darkMap, width, rect) {
+  let count = 0;
+  for (let y = rect.top; y <= rect.bottom; y += 1) {
+    for (let x = rect.left; x <= rect.right; x += 1) count += darkMap[y * width + x];
+  }
+  return count;
+}
+
+function splitEvenly(min, max, parts) {
+  return Array.from({ length: parts }, (_, index) => {
+    const start = Math.round(min + ((max - min) * index) / parts);
+    const end = Math.round(min + ((max - min) * (index + 1)) / parts);
+    return [start, end];
+  });
+}
+
+function mergeCloseNumbers(numbers, gap) {
+  return numbers.reduce((merged, value) => {
+    const previous = merged.at(-1);
+    if (previous !== undefined && value - previous <= gap) merged[merged.length - 1] = Math.round((previous + value) / 2);
+    else merged.push(value);
+    return merged;
+  }, []);
+}
+
+function padRect(rect, padding, width, height) {
+  return {
+    left: Math.max(0, Math.min(width - 1, rect.left - padding)),
+    right: Math.max(0, Math.min(width - 1, rect.right + padding)),
+    top: Math.max(0, Math.min(height - 1, rect.top - padding)),
+    bottom: Math.max(0, Math.min(height - 1, rect.bottom + padding))
+  };
+}
+
+async function recognizeNumericCell(source, rect, label) {
+  const cellCanvas = cropCellCanvas(source, rect);
+  const result = await Tesseract.recognize(cellCanvas, "eng", {
+    tessedit_pageseg_mode: "7",
+    tessedit_char_whitelist: "0123456789",
+    preserve_interword_spaces: "0",
+    user_defined_dpi: "300",
+    logger: (progress) => {
+      if (progress.status === "recognizing text") updateUploadStatus(`表セルを数字専用OCRで読み取り中です（${label} ${Math.round(progress.progress * 100)}%）...`);
+    }
+  });
+  const raw = normalizeOcrText(result.data.text);
+  const digits = (raw.match(/\d+/g) || []).join("");
+  return {
+    value: digits ? numberValue(digits) : 0,
+    text: digits,
+    confidence: Math.max(0, Math.min(100, Math.round(result.data.confidence || 0)))
+  };
+}
+
+function cropCellCanvas(source, rect) {
+  const width = Math.max(1, rect.right - rect.left + 1);
+  const height = Math.max(1, rect.bottom - rect.top + 1);
+  const canvas = document.createElement("canvas");
+  canvas.width = width + 18;
+  canvas.height = height + 18;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, rect.left, rect.top, width, height, 9, 9, width, height);
+  return enhanceCanvas(canvas, { contrast: 1.7, brightness: 8, threshold: 170, invert: false });
+}
+
+function buildOcrRowFromCells(cells, rowIndex) {
+  if (cells.length < 5) return null;
+  const [unitCell, gamesCell, bbCell, rbCell, totalCell] = cells;
+  const row = validateOcrTableRow({
+    unit: unitCell.value,
+    games: gamesCell.value,
+    bb: bbCell.value,
+    rb: rbCell.value,
+    ocrTotal: totalCell.value,
+    confidence: Math.round(cells.reduce((sum, cell) => sum + cell.confidence, 0) / cells.length),
+    rowIndex
+  });
+  return row.excluded ? null : row;
+}
+
+function validateOcrTableRow(row) {
+  const checks = [];
+  const unit = Math.round(row.unit || 0);
+  const games = Math.round(row.games || 0);
+  const bb = Math.round(row.bb || 0);
+  const rb = Math.round(row.rb || 0);
+  const calculatedTotal = games > 0 && bb + rb > 0 ? games / (bb + rb) : null;
+
+  if (!games && !bb && !rb) return { excluded: true };
+  if (bb > games || rb > games) return { excluded: true };
+  if (!unit || unit > 9999) checks.push("台番要確認");
+  if (!games || games > 200000) checks.push("累計G要確認");
+  if (bb + rb <= 0) checks.push("BB/RB要確認");
+  if (calculatedTotal && row.ocrTotal) {
+    const denominator = row.ocrTotal >= 1000 && String(row.ocrTotal).startsWith("1") ? Number(String(row.ocrTotal).slice(1)) : row.ocrTotal;
+    if (denominator && Math.abs(calculatedTotal - denominator) / calculatedTotal > 0.18) checks.push("合算差異");
+  }
+  if (row.confidence < 62) checks.push("低信頼度");
+
+  return {
+    unit: unit ? String(unit) : "",
+    games,
+    bb,
+    rb,
+    ocrConfidence: row.confidence,
+    ocrStatus: checks.length ? `要確認: ${checks.join("・")}` : "OK",
+    memo: `表OCR 信頼度${row.confidence}% / 合算再計算${rateText(calculatedTotal)}${row.ocrTotal ? ` / OCR合算候補 ${row.ocrTotal}` : ""}`
+  };
 }
 
 async function recognizeBasicDataImage(file, imageNumber) {
@@ -372,6 +637,8 @@ function toOcrRow(unit, games, bb, rb, total) {
     games: Math.round(games),
     bb: Math.round(bb),
     rb: Math.round(rb),
+    ocrStatus: "要確認: 従来OCR",
+    ocrConfidence: "",
     memo: total ? `OCR合算 ${total}` : "基本データ画像OCR"
   };
 }
@@ -425,6 +692,7 @@ function addDraftRow(seed = {}) {
   $(".bb", row).value = seed.bb ?? "";
   $(".rb", row).value = seed.rb ?? "";
   $(".diff", row).value = seed.diff ?? "";
+  setOcrStatusCell($(".ocr-check", row), seed.ocrStatus, seed.ocrConfidence);
   $(".row-memo", row).value = seed.memo ?? "";
   row.addEventListener("input", () => updateDraftRow(row));
   $(".remove-row", row).addEventListener("click", () => {
@@ -445,6 +713,7 @@ function updateDraftRow(row) {
   $(".total-rate", row).textContent = rates.totalText;
   const evaluation = evaluateRecord({ ...data, ...rates, machine: $("#machineInput").value.trim() });
   $(".rating-cell", row).innerHTML = ratingPill(evaluation.rating);
+  if (!data.ocrStatus) setOcrStatusCell($(".ocr-check", row), "手動", "");
   row.dataset.evaluation = JSON.stringify(evaluation);
   updateDraftHint();
 }
@@ -456,7 +725,9 @@ function getDraftRowData(row) {
     bb: numberValue($(".bb", row).value),
     rb: numberValue($(".rb", row).value),
     diff: numberValue($(".diff", row).value),
-    memo: $(".row-memo", row).value.trim()
+    memo: $(".row-memo", row).value.trim(),
+    ocrStatus: $(".ocr-check", row)?.dataset.status || "",
+    ocrConfidence: $(".ocr-check", row)?.dataset.confidence || ""
   };
 }
 
@@ -517,7 +788,7 @@ function saveDraftRows() {
       confidence: evaluation.confidence || "低",
       reason: evaluation.reason || "手動入力データです。",
       nearestSettings: evaluation.nearestSettings || "-",
-      memo: [sessionMemo, data.memo].filter(Boolean).join(" / "),
+      memo: [sessionMemo, data.ocrStatus && data.ocrStatus !== "手動" ? `OCR確認: ${data.ocrStatus}${data.ocrConfidence ? ` (${data.ocrConfidence}%)` : ""}` : "", data.memo].filter(Boolean).join(" / "),
       createdAt: new Date().toISOString()
     });
   });
@@ -546,6 +817,20 @@ function calculateRates(games, bb, rb) {
 
 function rateText(value) {
   return value ? `1/${value.toFixed(1)}` : "-";
+}
+
+function setOcrStatusCell(cell, status, confidence) {
+  const label = status || "手動";
+  cell.dataset.status = label;
+  cell.dataset.confidence = confidence || "";
+  cell.innerHTML = ocrStatusBadge(label, confidence);
+}
+
+function ocrStatusBadge(status, confidence) {
+  const label = status || "手動";
+  const detail = confidence ? `${label} (${confidence}%)` : label;
+  const className = label.startsWith("OK") ? "ocr-ok" : label.startsWith("手動") ? "ocr-manual" : "ocr-check-needed";
+  return `<span class="ocr-badge ${className}">${escapeHtml(detail)}</span>`;
 }
 
 function numberValue(value) {
