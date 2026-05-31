@@ -556,32 +556,24 @@ function analyzeGraphDiff(source, graphRect) {
   const imageData = ctx.getImageData(graphRect.left, graphRect.top, graphRect.right - graphRect.left + 1, graphRect.bottom - graphRect.top + 1);
   const width = imageData.width;
   const height = imageData.height;
-  const ignoreRect = {
-    left: Math.floor(width * 0.65),
-    right: width - 1,
-    top: Math.floor(height * 0.75),
-    bottom: height - 1
-  };
+  const yellowMask = buildYellowPixelMask(imageData);
+  const yellowTextBlocks = detectYellowTextBlocks(yellowMask, width, height);
   const yellowByX = new Map();
   let yellowCount = 0;
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      if (pointInRect(x, y, ignoreRect)) continue;
-      const offset = (y * width + x) * 4;
-      const r = imageData.data[offset];
-      const g = imageData.data[offset + 1];
-      const b = imageData.data[offset + 2];
-      if (isGraphYellow(r, g, b)) {
-        yellowCount += 1;
-        if (!yellowByX.has(x)) yellowByX.set(x, []);
-        yellowByX.get(x).push(y);
-      }
+      const index = y * width + x;
+      if (!yellowMask[index] || yellowTextBlocks.some((block) => pointInRect(x, y, block))) continue;
+      yellowCount += 1;
+      if (!yellowByX.has(x)) yellowByX.set(x, []);
+      yellowByX.get(x).push(y);
     }
   }
 
   const zeroLineY = detectZeroLineY(imageData);
   const endpoint = detectYellowEndpoint(yellowByX, width);
+  const endpointSide = getEndpointSide(endpoint, zeroLineY);
   const warnings = [];
   if (zeroLineY === null) warnings.push("0ライン要確認");
   if (!endpoint) warnings.push("終点要確認");
@@ -593,17 +585,121 @@ function analyzeGraphDiff(source, graphRect) {
     const lowerY = height - 3;
     if (endpoint.y < zeroLineY) diff = ((zeroLineY - endpoint.y) / Math.max(1, zeroLineY - upperY)) * 5000;
     else diff = -((endpoint.y - zeroLineY) / Math.max(1, lowerY - zeroLineY)) * 5000;
-    diff = Math.round(clamp(diff, -5000, 5000) / 50) * 50;
+    diff = roundEstimatedGraphDiff(diff, endpoint, zeroLineY);
   }
 
   return {
     diff,
     zeroLineY,
     endpoint,
+    endpointSide,
     yellowCount,
+    yellowTextBlocks,
     warnings,
     status: warnings.length ? `要確認: グラフ推定・${warnings.join("・")}` : "要確認: グラフ推定"
   };
+}
+
+function buildYellowPixelMask(imageData) {
+  const { data, width, height } = imageData;
+  const mask = new Uint8Array(width * height);
+  for (let i = 0; i < data.length; i += 4) {
+    if (isGraphYellow(data[i], data[i + 1], data[i + 2])) mask[i / 4] = 1;
+  }
+  return mask;
+}
+
+function detectYellowTextBlocks(yellowMask, width, height) {
+  const components = detectYellowComponents(yellowMask, width, height);
+  const glyphCandidates = components.filter((component) => isLowerRightYellowGlyph(component, width, height));
+  return mergeYellowGlyphBlocks(glyphCandidates)
+    .filter((component) => isLikelyYellowPayoutText(component, width, height))
+    .map((component) => ({ left: component.left, right: component.right, top: component.top, bottom: component.bottom }));
+}
+
+function detectYellowComponents(mask, width, height) {
+  const visited = new Uint8Array(mask.length);
+  const components = [];
+  for (let start = 0; start < mask.length; start += 1) {
+    if (!mask[start] || visited[start]) continue;
+    const queue = [start];
+    visited[start] = 1;
+    let head = 0;
+    let count = 0;
+    let left = width;
+    let right = 0;
+    let top = height;
+    let bottom = 0;
+
+    while (head < queue.length) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = Math.floor(index / width);
+      count += 1;
+      left = Math.min(left, x);
+      right = Math.max(right, x);
+      top = Math.min(top, y);
+      bottom = Math.max(bottom, y);
+
+      for (let dy = -1; dy <= 1; dy += 1) {
+        for (let dx = -1; dx <= 1; dx += 1) {
+          if (!dx && !dy) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          const next = ny * width + nx;
+          if (mask[next] && !visited[next]) {
+            visited[next] = 1;
+            queue.push(next);
+          }
+        }
+      }
+    }
+    components.push({ left, right, top, bottom, count });
+  }
+  return components;
+}
+
+
+function isLowerRightYellowGlyph(component, width, height) {
+  const rectWidth = component.right - component.left + 1;
+  const rectHeight = component.bottom - component.top + 1;
+  const density = component.count / Math.max(1, rectWidth * rectHeight);
+  const centerX = (component.left + component.right) / 2;
+  const centerY = (component.top + component.bottom) / 2;
+  return centerX >= width * 0.58
+    && centerY >= height * 0.58
+    && rectHeight >= Math.max(8, height * 0.035)
+    && rectWidth >= 3
+    && density >= 0.10;
+}
+
+function mergeYellowGlyphBlocks(components) {
+  const blocks = [];
+  components.forEach((component) => {
+    const existing = blocks.find((block) => rectsOverlap(block, component, 10));
+    if (existing) {
+      existing.left = Math.min(existing.left, component.left);
+      existing.right = Math.max(existing.right, component.right);
+      existing.top = Math.min(existing.top, component.top);
+      existing.bottom = Math.max(existing.bottom, component.bottom);
+      existing.count += component.count;
+    } else blocks.push({ ...component });
+  });
+  return blocks;
+}
+
+function isLikelyYellowPayoutText(component, width, height) {
+  const rectWidth = component.right - component.left + 1;
+  const rectHeight = component.bottom - component.top + 1;
+  const density = component.count / Math.max(1, rectWidth * rectHeight);
+  const centerX = (component.left + component.right) / 2;
+  const centerY = (component.top + component.bottom) / 2;
+  const inLowerRight = centerX >= width * 0.58 && centerY >= height * 0.58;
+  const largeGlyphBlock = rectWidth >= Math.max(22, width * 0.06) && rectHeight >= Math.max(10, height * 0.045);
+  const textLikeDensity = density >= 0.12;
+  const notThinLine = rectHeight > Math.max(7, height * 0.028) && rectWidth / Math.max(1, rectHeight) < 9;
+  return inLowerRight && largeGlyphBlock && textLikeDensity && notThinLine;
 }
 
 function pointInRect(x, y, rect) {
@@ -612,6 +708,22 @@ function pointInRect(x, y, rect) {
 
 function isGraphYellow(r, g, b) {
   return r >= 145 && g >= 115 && b <= 105 && r > b * 1.45 && g > b * 1.25 && Math.abs(r - g) <= 95;
+}
+
+function getEndpointSide(endpoint, zeroLineY) {
+  if (!endpoint || zeroLineY === null) return "要確認";
+  if (endpoint.y < zeroLineY) return "0ラインより上";
+  if (endpoint.y > zeroLineY) return "0ラインより下";
+  return "0ライン上";
+}
+
+function roundEstimatedGraphDiff(value, endpoint, zeroLineY) {
+  const rounded = Math.round(clamp(value, -5000, 5000) / 50) * 50;
+  if (rounded === 0 && endpoint && zeroLineY !== null) {
+    if (endpoint.y > zeroLineY) return -50;
+    if (endpoint.y < zeroLineY) return 50;
+  }
+  return rounded;
 }
 
 function detectZeroLineY(imageData) {
@@ -738,7 +850,7 @@ function renderGraphResults(results) {
     const diff = result.diff === null ? "差枚要確認" : formatSignedNumber(result.diff);
     const note = result.diff === null ? result.warnings.join("・") || "要確認" : "グラフ推定";
     const reflect = result.applied ? "反映済み" : result.skipped ? "既存差枚あり未上書き" : "自動反映なし";
-    return `<div class="graph-result-item"><strong>${escapeHtml(unit)}</strong><span>→ ${escapeHtml(diff)} / ${escapeHtml(note)}</span><em>${escapeHtml(reflect)}</em></div>`;
+    return `<div class="graph-result-item"><strong>${escapeHtml(unit)}</strong><span>→ ${escapeHtml(diff)} / ${escapeHtml(note)}<small>${escapeHtml(graphResultDebugText(result))}</small></span><em>${escapeHtml(reflect)}</em></div>`;
   }).join("") : '<p class="muted">黒いグラフ領域を検出できませんでした。</p>';
 
   previews.innerHTML = "";
@@ -753,9 +865,17 @@ function createGraphPreviewCard(result) {
   const title = document.createElement("strong");
   title.textContent = `${result.unit || "台番号要確認"} → ${result.diff === null ? "差枚要確認" : formatSignedNumber(result.diff)}`;
   const detail = document.createElement("p");
-  detail.textContent = result.warnings.length ? result.warnings.join("・") : "グラフ推定（要確認）";
+  detail.textContent = `${result.warnings.length ? `${result.warnings.join("・")} / ` : ""}${graphResultDebugText(result)}`;
   card.append(title, canvas, detail);
   return card;
+}
+
+function graphResultDebugText(result) {
+  const zero = result.zeroLineY === null ? "要確認" : Math.round(result.zeroLineY);
+  const endpointY = result.endpoint ? Math.round(result.endpoint.y) : "要確認";
+  const side = result.endpointSide || getEndpointSide(result.endpoint, result.zeroLineY);
+  const diff = result.diff === null ? "要確認" : `${formatSignedNumber(result.diff)}枚`;
+  return `0ラインY: ${zero} / 終点Y: ${endpointY} / ${side} / 推定差枚: ${diff}`;
 }
 
 function drawGraphDebugOverlay(canvas, result) {
@@ -1662,7 +1782,12 @@ function ocrStatusBadge(status, confidence) {
 }
 
 function numberValue(value) {
-  const parsed = Number(value);
+  const normalized = String(value ?? "")
+    .replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
+    .replace(/[−ー－―]/g, "-")
+    .replace(/,/g, "")
+    .trim();
+  const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
