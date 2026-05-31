@@ -111,10 +111,20 @@
 
       <div class="action-row">
         <button class="secondary" id="readBasicImagesButton" type="button">指定範囲をOCR読み取り</button>
+        <button class="secondary" id="readGraphImagesButton" type="button">グラフ差枚を読み取り</button>
         <button class="secondary" id="mockReadButton" type="button">読み取り枠を追加</button>
         <button id="addRowButton" type="button">台を追加</button>
         <button class="danger subtle" id="clearDraftButton" type="button">入力をクリア</button>
       </div>
+
+      <section class="graph-result-panel" id="graphResultPanel" hidden>
+        <div class="section-head compact-head">
+          <h3>グラフ差枚 読み取り確認</h3>
+          <p>黄色の最大獲得枚数は使わず、黄色グラフ線の終点から推定した差枚です。保存前に必ず手動確認・修正してください。</p>
+        </div>
+        <div class="graph-result-list" id="graphResultList"></div>
+        <div class="graph-preview-grid" id="graphPreviewGrid"></div>
+      </section>
 
       <div class="table-wrap">
         <table class="data-table" id="draftTable">
@@ -303,7 +313,7 @@
       <td class="rb-rate">-</td>
       <td class="total-rate">-</td>
       <td class="ocr-check">手動</td>
-      <td><input class="diff" type="number" placeholder="0"></td>
+      <td><input class="diff" type="text" inputmode="decimal" pattern="-?[0-9]*" placeholder="例：-500"></td>
       <td class="rating-cell">要確認</td>
       <td><input class="row-memo" placeholder="メモ"></td>
       <td><button class="icon danger remove-row" type="button" aria-label="削除">×</button></td>
