@@ -73,9 +73,6 @@ function bindDraftTable() {
     updateDraftHint();
   });
   $("#saveDraftButton").addEventListener("click", saveDraftRows);
-  $$('[data-unit-offset]').forEach((button) => {
-    button.addEventListener("click", () => shiftDraftUnitNumbers(numberValue(button.dataset.unitOffset)));
-  });
 }
 
 function bindStores() {
@@ -1040,35 +1037,6 @@ function isLikelyUnitRow(unit, games, bb, rb) {
 
 function refreshDraftEvaluations() {
   [...$("#draftTable tbody").children].forEach((row) => updateDraftRow(row));
-}
-
-function shiftDraftUnitNumbers(offset) {
-  const rows = [...$("#draftTable tbody").children];
-  let changed = 0;
-  rows.forEach((row) => {
-    const input = $(".unit", row);
-    const current = numberValue(input.value);
-    if (!current) return;
-    const next = current + offset;
-    if (next <= 0) return;
-    input.value = String(next);
-    setOcrStatusCell($(".ocr-check", row), "要確認: 台番号一括補正", $(".ocr-check", row)?.dataset.confidence || "");
-    appendDraftMemo(row, `台番号一括補正: ${formatSignedOffset(offset)} / ${current}→${next}`);
-    updateDraftRow(row);
-    changed += 1;
-  });
-  updateDraftHint();
-  if (!changed) alert("補正できる台番号がありません。");
-}
-
-function appendDraftMemo(row, text) {
-  const input = $(".row-memo", row);
-  if (!input || input.value.includes(text)) return;
-  input.value = [input.value.trim(), text].filter(Boolean).join(" / ");
-}
-
-function formatSignedOffset(offset) {
-  return `${offset > 0 ? "+" : ""}${offset}`;
 }
 
 function addDraftRow(seed = {}) {
