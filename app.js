@@ -117,6 +117,7 @@ function bindImageUploads() {
   $("#basicImage").addEventListener("change", handleBasicImagesSelected);
   $("#graphImage").addEventListener("change", () => updateUploadStatus());
   $("#readBasicImagesButton").addEventListener("click", readBasicImages);
+  $("#readGraphImagesButton").addEventListener("click", readGraphImages);
   $("#ocrPreviewFileSelect").addEventListener("change", (event) => selectOcrPreviewImage(Number(event.target.value)));
   ["ocrTop", "ocrBottom", "ocrLeft", "ocrRight", "ocrRowCount"].forEach((id) => {
     $(`#${id}`).addEventListener("input", () => {
@@ -308,6 +309,479 @@ async function readBasicImages() {
   } finally {
     button.disabled = false;
   }
+}
+
+
+async function readGraphImages() {
+  const files = [...$("#graphImage").files];
+  if (!files.length) {
+    alert("読み取るグラフ画像を選択してください。");
+    return;
+  }
+  if (!window.Tesseract) {
+    alert("OCRライブラリを読み込めませんでした。ネットワーク接続後に再読み込みしてください。");
+    return;
+  }
+
+  const button = $("#readGraphImagesButton");
+  button.disabled = true;
+  const allResults = [];
+  try {
+    updateUploadStatus("グラフ領域を検出中です...");
+    for (const [index, file] of files.entries()) {
+      const imageNumber = `${index + 1}/${files.length}枚目`;
+      const results = await recognizeGraphDiffImage(file, imageNumber);
+      allResults.push(...results);
+    }
+    applyGraphResultsToDraftRows(allResults);
+    renderGraphResults(allResults);
+    const reflected = allResults.filter((result) => result.applied).length;
+    updateUploadStatus(`${files.length}枚のグラフ画像から${allResults.length}件を読み取り、${reflected}件を入力表へ反映しました。黄色の最大獲得枚数は差枚として使用していません。`);
+  } catch (error) {
+    console.error(error);
+    updateUploadStatus("グラフ差枚の読み取り中にエラーが発生しました。画像を確認して再実行してください。");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function recognizeGraphDiffImage(file, imageNumber) {
+  updateUploadStatus(`黒いグラフ領域を検出中です（${imageNumber}）...`);
+  const bitmap = await loadImageBitmap(file);
+  const source = drawScaledImage(bitmap, { scale: 1.8 });
+  const regions = detectGraphRegions(source);
+  const results = [];
+
+  for (const [index, region] of regions.entries()) {
+    const label = `${imageNumber} グラフ${index + 1}/${regions.length}`;
+    updateUploadStatus(`台番号をOCR中です（${label}）...`);
+    const unitResult = await recognizeGraphUnitNumber(source, region, label);
+    updateUploadStatus(`黄色ライン終点から差枚を推定中です（${label}）...`);
+    const diffResult = analyzeGraphDiff(source, region);
+    results.push({
+      ...diffResult,
+      unit: unitResult.unit,
+      unitConfidence: unitResult.confidence,
+      unitText: unitResult.text,
+      region,
+      imageNumber,
+      graphIndex: index + 1,
+      sourceCanvas: source,
+      applied: false,
+      skipped: false
+    });
+  }
+  return results;
+}
+
+function detectGraphRegions(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const { width, height } = canvas;
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const dark = new Uint8Array(width * height);
+  for (let i = 0; i < imageData.data.length; i += 4) {
+    const r = imageData.data[i];
+    const g = imageData.data[i + 1];
+    const b = imageData.data[i + 2];
+    const luminance = r * 0.299 + g * 0.587 + b * 0.114;
+    if (luminance < 45 && r < 75 && g < 75 && b < 75) dark[i / 4] = 1;
+  }
+
+  const visited = new Uint8Array(width * height);
+  const components = [];
+  const minWidth = Math.max(90, width * 0.22);
+  const minHeight = Math.max(70, height * 0.08);
+  const minPixels = Math.max(5000, width * height * 0.008);
+
+  for (let start = 0; start < dark.length; start += 1) {
+    if (!dark[start] || visited[start]) continue;
+    const queue = [start];
+    visited[start] = 1;
+    let head = 0;
+    let count = 0;
+    let left = width;
+    let right = 0;
+    let top = height;
+    let bottom = 0;
+
+    while (head < queue.length) {
+      const index = queue[head++];
+      const x = index % width;
+      const y = Math.floor(index / width);
+      count += 1;
+      left = Math.min(left, x);
+      right = Math.max(right, x);
+      top = Math.min(top, y);
+      bottom = Math.max(bottom, y);
+
+      const neighbors = [];
+      if (x > 0) neighbors.push(index - 1);
+      if (x < width - 1) neighbors.push(index + 1);
+      if (y > 0) neighbors.push(index - width);
+      if (y < height - 1) neighbors.push(index + width);
+      for (const next of neighbors) {
+        if (dark[next] && !visited[next]) {
+          visited[next] = 1;
+          queue.push(next);
+        }
+      }
+    }
+
+    const rectWidth = right - left + 1;
+    const rectHeight = bottom - top + 1;
+    const fill = count / Math.max(1, rectWidth * rectHeight);
+    if (count >= minPixels && rectWidth >= minWidth && rectHeight >= minHeight && fill > 0.35) {
+      components.push(padRect({ left, right, top, bottom }, 2, width, height));
+    }
+  }
+
+  const connectedRegions = mergeOverlappingRects(components)
+    .filter((rect) => rect.right - rect.left >= minWidth && rect.bottom - rect.top >= minHeight)
+    .sort((a, b) => (a.top - b.top) || (a.left - b.left));
+  const projectedRegions = detectGraphRegionsByProjection(dark, width, height);
+  return mergeOverlappingRects([...connectedRegions, ...projectedRegions])
+    .filter((rect) => rect.right - rect.left >= minWidth && rect.bottom - rect.top >= minHeight)
+    .sort((a, b) => (a.top - b.top) || (a.left - b.left));
+}
+
+function detectGraphRegionsByProjection(darkMap, width, height) {
+  const rowCounts = Array(height).fill(0);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) rowCounts[y] += darkMap[y * width + x];
+  }
+  const rowBands = makeDenseBands(rowCounts, Math.max(80, width * 0.24), 50, 12);
+  const regions = [];
+  rowBands.forEach((band) => {
+    const columnCounts = Array(width).fill(0);
+    for (let x = 0; x < width; x += 1) {
+      for (let y = band.start; y <= band.end; y += 1) columnCounts[x] += darkMap[y * width + x];
+    }
+    const bandHeight = band.end - band.start + 1;
+    const columnBands = makeDenseBands(columnCounts, Math.max(40, bandHeight * 0.38), 80, 14);
+    columnBands.forEach((column) => {
+      const rect = trimDarkRect(darkMap, width, height, { left: column.start, right: column.end, top: band.start, bottom: band.end });
+      if (rect) regions.push(padRect(rect, 3, width, height));
+    });
+  });
+  return regions;
+}
+
+function makeDenseBands(counts, threshold, minSize, gapTolerance) {
+  const bands = [];
+  let start = null;
+  let lastDense = null;
+  for (let index = 0; index < counts.length; index += 1) {
+    if (counts[index] >= threshold) {
+      if (start === null) start = index;
+      lastDense = index;
+    } else if (start !== null && index - lastDense > gapTolerance) {
+      if (lastDense - start + 1 >= minSize) bands.push({ start, end: lastDense });
+      start = null;
+      lastDense = null;
+    }
+  }
+  if (start !== null && lastDense - start + 1 >= minSize) bands.push({ start, end: lastDense });
+  return bands;
+}
+
+function trimDarkRect(darkMap, width, height, rect) {
+  let left = width;
+  let right = 0;
+  let top = height;
+  let bottom = 0;
+  let count = 0;
+  for (let y = rect.top; y <= rect.bottom; y += 1) {
+    for (let x = rect.left; x <= rect.right; x += 1) {
+      if (!darkMap[y * width + x]) continue;
+      count += 1;
+      left = Math.min(left, x);
+      right = Math.max(right, x);
+      top = Math.min(top, y);
+      bottom = Math.max(bottom, y);
+    }
+  }
+  if (!count) return null;
+  return { left, right, top, bottom };
+}
+
+function mergeOverlappingRects(rects) {
+  const merged = [];
+  rects.forEach((rect) => {
+    const existing = merged.find((item) => rectsOverlap(item, rect, 12));
+    if (existing) {
+      existing.left = Math.min(existing.left, rect.left);
+      existing.right = Math.max(existing.right, rect.right);
+      existing.top = Math.min(existing.top, rect.top);
+      existing.bottom = Math.max(existing.bottom, rect.bottom);
+    } else merged.push({ ...rect });
+  });
+  return merged;
+}
+
+function rectsOverlap(a, b, padding = 0) {
+  return !(a.right + padding < b.left || b.right + padding < a.left || a.bottom + padding < b.top || b.bottom + padding < a.top);
+}
+
+async function recognizeGraphUnitNumber(source, graphRect, label) {
+  const titleHeight = Math.max(36, Math.round((graphRect.bottom - graphRect.top + 1) * 0.22));
+  const rect = {
+    left: Math.max(0, graphRect.left - 10),
+    right: Math.min(source.width - 1, graphRect.right + 10),
+    top: Math.max(0, graphRect.top - titleHeight - 8),
+    bottom: Math.max(0, graphRect.top - 1)
+  };
+  const canvas = cropSourceCanvas(source, rect, { padding: 8, fill: "white" });
+  const enhanced = enhanceCanvas(canvas, { contrast: 1.55, brightness: 10, threshold: null, invert: false });
+  const result = await Tesseract.recognize(enhanced, "eng", {
+    tessedit_pageseg_mode: "6",
+    tessedit_char_whitelist: "[]0123456789",
+    preserve_interword_spaces: "1",
+    user_defined_dpi: "300",
+    logger: (progress) => {
+      if (progress.status === "recognizing text") updateUploadStatus(`台番号をOCR中です（${label} ${Math.round(progress.progress * 100)}%）...`);
+    }
+  });
+  const text = normalizeOcrText(result.data.text);
+  const bracket = text.match(/\[\s*(\d{1,5})\s*\]/);
+  const fallback = text.match(/\d{1,5}/);
+  return {
+    unit: bracket?.[1] || fallback?.[0] || "",
+    text,
+    confidence: Math.max(0, Math.min(100, Math.round(result.data.confidence || 0)))
+  };
+}
+
+function analyzeGraphDiff(source, graphRect) {
+  const ctx = source.getContext("2d", { willReadFrequently: true });
+  const imageData = ctx.getImageData(graphRect.left, graphRect.top, graphRect.right - graphRect.left + 1, graphRect.bottom - graphRect.top + 1);
+  const width = imageData.width;
+  const height = imageData.height;
+  const ignoreRect = {
+    left: Math.floor(width * 0.65),
+    right: width - 1,
+    top: Math.floor(height * 0.75),
+    bottom: height - 1
+  };
+  const yellowByX = new Map();
+  let yellowCount = 0;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (pointInRect(x, y, ignoreRect)) continue;
+      const offset = (y * width + x) * 4;
+      const r = imageData.data[offset];
+      const g = imageData.data[offset + 1];
+      const b = imageData.data[offset + 2];
+      if (isGraphYellow(r, g, b)) {
+        yellowCount += 1;
+        if (!yellowByX.has(x)) yellowByX.set(x, []);
+        yellowByX.get(x).push(y);
+      }
+    }
+  }
+
+  const zeroLineY = detectZeroLineY(imageData);
+  const endpoint = detectYellowEndpoint(yellowByX, width);
+  const warnings = [];
+  if (zeroLineY === null) warnings.push("0ライン要確認");
+  if (!endpoint) warnings.push("終点要確認");
+  if (yellowCount < Math.max(25, width * 0.08)) warnings.push("低信頼度");
+
+  let diff = null;
+  if (zeroLineY !== null && endpoint) {
+    const upperY = 2;
+    const lowerY = height - 3;
+    if (endpoint.y < zeroLineY) diff = ((zeroLineY - endpoint.y) / Math.max(1, zeroLineY - upperY)) * 5000;
+    else diff = -((endpoint.y - zeroLineY) / Math.max(1, lowerY - zeroLineY)) * 5000;
+    diff = Math.round(clamp(diff, -5000, 5000) / 50) * 50;
+  }
+
+  return {
+    diff,
+    zeroLineY,
+    endpoint,
+    yellowCount,
+    warnings,
+    status: warnings.length ? `要確認: グラフ推定・${warnings.join("・")}` : "要確認: グラフ推定"
+  };
+}
+
+function pointInRect(x, y, rect) {
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
+
+function isGraphYellow(r, g, b) {
+  return r >= 145 && g >= 115 && b <= 105 && r > b * 1.45 && g > b * 1.25 && Math.abs(r - g) <= 95;
+}
+
+function detectZeroLineY(imageData) {
+  const { width, height, data } = imageData;
+  const candidates = [];
+  const xStart = Math.floor(width * 0.04);
+  const xEnd = Math.floor(width * 0.96);
+  for (let y = Math.floor(height * 0.12); y < Math.floor(height * 0.88); y += 1) {
+    let white = 0;
+    let maxRun = 0;
+    let run = 0;
+    for (let x = xStart; x <= xEnd; x += 1) {
+      const offset = (y * width + x) * 4;
+      const r = data[offset];
+      const g = data[offset + 1];
+      const b = data[offset + 2];
+      const isWhiteLine = r > 165 && g > 165 && b > 165 && Math.max(r, g, b) - Math.min(r, g, b) < 55;
+      if (isWhiteLine) {
+        white += 1;
+        run += 1;
+        maxRun = Math.max(maxRun, run);
+      } else run = 0;
+    }
+    const ratio = white / Math.max(1, xEnd - xStart + 1);
+    if (ratio > 0.22 || maxRun > width * 0.28) {
+      candidates.push({ y, score: ratio + (maxRun / width) * 0.7 - Math.abs(y - height / 2) / height * 0.55 });
+    }
+  }
+  if (!candidates.length) return null;
+  const merged = [];
+  candidates.forEach((candidate) => {
+    const previous = merged.at(-1);
+    if (previous && candidate.y - previous.end <= 2) {
+      previous.end = candidate.y;
+      previous.score = Math.max(previous.score, candidate.score);
+      previous.sum += candidate.y;
+      previous.count += 1;
+    } else merged.push({ start: candidate.y, end: candidate.y, score: candidate.score, sum: candidate.y, count: 1 });
+  });
+  const best = merged.sort((a, b) => b.score - a.score)[0];
+  return Math.round(best.sum / best.count);
+}
+
+function detectYellowEndpoint(yellowByX, width) {
+  const xs = [...yellowByX.keys()].sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const rightmost = xs.at(-1);
+  if (rightmost < width * 0.45) return null;
+  const windowXs = xs.filter((x) => x >= rightmost - 10).slice(-16);
+  const ys = windowXs.map((x) => median(yellowByX.get(x))).filter((value) => Number.isFinite(value));
+  if (ys.length < 2) return null;
+  return { x: Math.round(median(windowXs)), y: Math.round(median(ys)) };
+}
+
+function median(values) {
+  const sorted = values.filter((value) => Number.isFinite(value)).slice().sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function cropSourceCanvas(source, rect, options = {}) {
+  const width = Math.max(1, rect.right - rect.left + 1);
+  const height = Math.max(1, rect.bottom - rect.top + 1);
+  const padding = options.padding || 0;
+  const canvas = document.createElement("canvas");
+  canvas.width = width + padding * 2;
+  canvas.height = height + padding * 2;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = options.fill || "black";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, rect.left, rect.top, width, height, padding, padding, width, height);
+  return canvas;
+}
+
+function applyGraphResultsToDraftRows(results) {
+  const usable = results.filter((result) => result.unit && result.diff !== null && !result.warnings.includes("0ライン要確認") && !result.warnings.includes("終点要確認"));
+  if (!usable.length) return;
+  if (isDraftTableEmpty()) $("#draftTable tbody").innerHTML = "";
+
+  usable.forEach((result) => {
+    const row = findDraftRowByUnit(result.unit) || addDraftRowAndReturn({ unit: result.unit });
+    const currentDiff = $(".diff", row).value.trim();
+    const memoText = `グラフ推定差枚: ${formatSignedNumber(result.diff)}`;
+    if (!currentDiff) {
+      $(".diff", row).value = result.diff;
+      result.applied = true;
+    } else {
+      result.skipped = true;
+    }
+    appendRowMemo(row, currentDiff ? `${memoText}（既存差枚あり未上書き）` : memoText);
+    setOcrStatusCell($(".ocr-check", row), result.status, result.unitConfidence || "");
+    updateDraftRow(row);
+  });
+}
+
+function findDraftRowByUnit(unit) {
+  return [...$("#draftTable tbody").children].find((row) => $(".unit", row).value.trim() === String(unit));
+}
+
+function addDraftRowAndReturn(seed = {}) {
+  addDraftRow(seed);
+  return $("#draftTable tbody").lastElementChild;
+}
+
+function appendRowMemo(row, text) {
+  const input = $(".row-memo", row);
+  if (!input.value.includes(text)) input.value = [input.value.trim(), text].filter(Boolean).join(" / ");
+}
+
+function formatSignedNumber(value) {
+  const number = Math.round(Number(value || 0));
+  return `${number > 0 ? "+" : ""}${number}`;
+}
+
+function renderGraphResults(results) {
+  const panel = $("#graphResultPanel");
+  const list = $("#graphResultList");
+  const previews = $("#graphPreviewGrid");
+  if (!panel || !list || !previews) return;
+  panel.hidden = false;
+  list.innerHTML = results.length ? results.map((result) => {
+    const unit = result.unit || "台番号要確認";
+    const diff = result.diff === null ? "差枚要確認" : formatSignedNumber(result.diff);
+    const note = result.diff === null ? result.warnings.join("・") || "要確認" : "グラフ推定";
+    const reflect = result.applied ? "反映済み" : result.skipped ? "既存差枚あり未上書き" : "自動反映なし";
+    return `<div class="graph-result-item"><strong>${escapeHtml(unit)}</strong><span>→ ${escapeHtml(diff)} / ${escapeHtml(note)}</span><em>${escapeHtml(reflect)}</em></div>`;
+  }).join("") : '<p class="muted">黒いグラフ領域を検出できませんでした。</p>';
+
+  previews.innerHTML = "";
+  results.forEach((result) => previews.appendChild(createGraphPreviewCard(result)));
+}
+
+function createGraphPreviewCard(result) {
+  const card = document.createElement("article");
+  card.className = "graph-preview-card";
+  const canvas = cropSourceCanvas(result.sourceCanvas, result.region, { padding: 0, fill: "black" });
+  drawGraphDebugOverlay(canvas, result);
+  const title = document.createElement("strong");
+  title.textContent = `${result.unit || "台番号要確認"} → ${result.diff === null ? "差枚要確認" : formatSignedNumber(result.diff)}`;
+  const detail = document.createElement("p");
+  detail.textContent = result.warnings.length ? result.warnings.join("・") : "グラフ推定（要確認）";
+  card.append(title, canvas, detail);
+  return card;
+}
+
+function drawGraphDebugOverlay(canvas, result) {
+  const ctx = canvas.getContext("2d");
+  ctx.save();
+  ctx.lineWidth = 2;
+  if (result.zeroLineY !== null) {
+    ctx.strokeStyle = "#00d5ff";
+    ctx.beginPath();
+    ctx.moveTo(0, result.zeroLineY);
+    ctx.lineTo(canvas.width, result.zeroLineY);
+    ctx.stroke();
+  }
+  if (result.endpoint) {
+    ctx.strokeStyle = "#ff3b8a";
+    ctx.fillStyle = "#ff3b8a";
+    ctx.beginPath();
+    ctx.arc(result.endpoint.x, result.endpoint.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+  ctx.fillRect(6, 6, 150, 28);
+  ctx.fillStyle = "white";
+  ctx.font = "16px sans-serif";
+  ctx.fillText(result.diff === null ? "差枚要確認" : `${formatSignedNumber(result.diff)}枚 推定`, 14, 26);
+  ctx.restore();
 }
 
 
