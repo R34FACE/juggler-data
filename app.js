@@ -287,10 +287,7 @@ async function readBasicImages() {
       const imageNumber = `${index + 1}/${files.length}枚目`;
       const settings = getOcrRangeSettings(index);
       updateUploadStatus(`指定範囲を5列×${settings.rows}行に分割中です（${imageNumber}）...`);
-      const rows = await recognizeBasicDataTableImage(file, imageNumber, settings);
-      updateUploadStatus(`基本データ画像を補正中です（${imageNumber}）...`);
-      const tableRows = await recognizeBasicDataTableImage(file, imageNumber);
-      let rows = tableRows;
+      let rows = await recognizeBasicDataTableImage(file, imageNumber, settings);
       if (!rows.length) {
         updateUploadStatus(`表分割で抽出できなかったため、従来OCRへ切り替えます（${imageNumber}）...`);
         const ocrResults = await recognizeBasicDataImage(file, imageNumber);
@@ -302,7 +299,6 @@ async function readBasicImages() {
     }
     if (added) {
       updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。指定範囲を5列固定で読み取り、合算はBB+RBから再計算しています。要確認の行は保存前に修正してください。`);
-      updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。表セル単位で読み取り、合算はBB+RBから再計算しています。要確認の行は保存前に修正してください。`);
     } else {
       updateUploadStatus("OCRは完了しましたが、台番・累計G・BB・RBを抽出できませんでした。プレビューで表の外枠・行数を調整して再実行するか、手動入力してください。");
     }
@@ -317,25 +313,16 @@ async function readBasicImages() {
 
 async function recognizeBasicDataTableImage(file, imageNumber, settings) {
   updateUploadStatus(`指定範囲を補正中です（${imageNumber}）...`);
+  const rangeSettings = normalizeOcrRangeSettings(settings || defaultOcrRangeSettings());
   const bitmap = await loadImageBitmap(file);
   const source = drawScaledImage(bitmap, { scale: 2.8 });
-  const tableCanvas = cropTableRangeCanvas(source, settings);
-  const cells = buildFixedGridCells(tableCanvas, settings.rows, 5);
+  const tableCanvas = cropTableRangeCanvas(source, rangeSettings);
+  const cells = buildFixedGridCells(tableCanvas, rangeSettings.rows, 5);
   const rows = [];
 
-  for (let rowIndex = 0; rowIndex < settings.rows; rowIndex += 1) {
+  for (let rowIndex = 0; rowIndex < rangeSettings.rows; rowIndex += 1) {
     const rowCells = cells.slice(rowIndex * 5, rowIndex * 5 + 5);
-    updateUploadStatus(`指定範囲セルを数字専用OCRで読み取り中です（${imageNumber} / ${rowIndex + 1}/${settings.rows}行）...`);
-async function recognizeBasicDataTableImage(file, imageNumber) {
-  updateUploadStatus(`基本データ画像の表を検出中です（${imageNumber}）...`);
-  const bitmap = await loadImageBitmap(file);
-  const source = drawScaledImage(bitmap, { scale: 2.8 });
-  const tableCanvas = enhanceCanvas(source, { contrast: 1.85, brightness: 14, threshold: 180, invert: false });
-  const layout = detectTableLayout(tableCanvas);
-  const rows = [];
-
-  for (const [rowIndex, rowCells] of layout.rows.entries()) {
-    updateUploadStatus(`表セルを数字専用OCRで読み取り中です（${imageNumber} / ${rowIndex + 1}/${layout.rows.length}行）...`);
+    updateUploadStatus(`指定範囲セルを数字専用OCRで読み取り中です（${imageNumber} / ${rowIndex + 1}/${rangeSettings.rows}行）...`);
     const cellResults = await Promise.all(rowCells.map((cell, columnIndex) => recognizeNumericCell(tableCanvas, cell, `${imageNumber} 行${rowIndex + 1} 列${columnIndex + 1}`)));
     const row = buildOcrRowFromCells(cellResults, rowIndex);
     if (row) rows.push(row);
@@ -369,6 +356,8 @@ function buildFixedGridCells(canvas, rowCount, columnCount) {
     }
   }
   return cells;
+}
+
 function detectTableLayout(canvas) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -553,8 +542,6 @@ async function recognizeNumericCell(source, rect, label) {
 }
 
 function cropCellCanvas(source, rect) {
-  const width = Math.max(1, rect.right - rect.left);
-  const height = Math.max(1, rect.bottom - rect.top);
   const width = Math.max(1, rect.right - rect.left + 1);
   const height = Math.max(1, rect.bottom - rect.top + 1);
   const canvas = document.createElement("canvas");
@@ -606,7 +593,6 @@ function validateOcrTableRow(row) {
   if (bb + rb <= 0) checks.push("BB/RB要確認");
   if (calculatedTotal && row.ocrTotal) {
     const denominator = chooseClosestTotalDenominator(row.ocrTotal, calculatedTotal);
-    const denominator = row.ocrTotal >= 1000 && String(row.ocrTotal).startsWith("1") ? Number(String(row.ocrTotal).slice(1)) : row.ocrTotal;
     if (denominator && Math.abs(calculatedTotal - denominator) / calculatedTotal > 0.18) checks.push("合算差異");
   }
   if (row.confidence < 62) checks.push("低信頼度");
