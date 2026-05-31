@@ -73,6 +73,9 @@ function bindDraftTable() {
     updateDraftHint();
   });
   $("#saveDraftButton").addEventListener("click", saveDraftRows);
+  $$('[data-unit-offset]').forEach((button) => {
+    button.addEventListener("click", () => shiftDraftUnitNumbers(numberValue(button.dataset.unitOffset)));
+  });
 }
 
 function bindStores() {
@@ -646,7 +649,12 @@ function validateOcrTableRow(row) {
   const unit = Math.round(row.unit || 0);
   const games = Math.round(row.games || 0);
   const bb = Math.round(row.bb || 0);
-  const rb = Math.round(row.rb || 0);
+  let rb = Math.round(row.rb || 0);
+  const rbCorrection = correctRbFromOcrTotal({ games, bb, rb, ocrTotal: row.ocrTotal });
+  if (rbCorrection) {
+    rb = rbCorrection.corrected;
+    checks.push("RB補正あり");
+  }
   const calculatedTotal = games > 0 && bb + rb > 0 ? games / (bb + rb) : null;
 
   if (!games && !bb && !rb) return { excluded: true };
@@ -667,9 +675,30 @@ function validateOcrTableRow(row) {
     rb,
     ocrConfidence: row.confidence,
     ocrStatus: checks.length ? `要確認: ${checks.join("・")}` : "OK",
-    memo: `表OCR 信頼度${row.confidence}% / 合算再計算${rateText(calculatedTotal)}${row.ocrTotal ? ` / OCR合算候補 ${row.ocrTotal}` : ""}`
+    memo: [
+      `表OCR 信頼度${row.confidence}% / 合算再計算${rateText(calculatedTotal)}${row.ocrTotal ? ` / OCR合算候補 ${row.ocrTotal}` : ""}`,
+      rbCorrection ? `RB補正: ${rbCorrection.original}→${rbCorrection.corrected}` : ""
+    ].filter(Boolean).join(" / ")
   };
 }
+
+function correctRbFromOcrTotal({ games, bb, rb, ocrTotal }) {
+  if (!games || !bb || !ocrTotal) return null;
+  const denominator = chooseClosestTotalDenominator(ocrTotal, games / Math.max(1, bb + rb));
+  if (!denominator || denominator < 30 || denominator > 1000) return null;
+
+  const estimatedTotalBonus = Math.round(games / denominator);
+  const estimatedRb = estimatedTotalBonus - bb;
+  if (estimatedTotalBonus <= 0 || estimatedRb < 0 || estimatedRb >= 1000) return null;
+
+  const rbLooksTooLow = rb <= 1 && estimatedRb >= 3;
+  const rbDiffersGreatly = Math.abs(rb - estimatedRb) >= Math.max(3, Math.round(estimatedTotalBonus * 0.35));
+  if (!rbLooksTooLow && !rbDiffersGreatly) return null;
+  if (Math.abs(games / Math.max(1, bb + estimatedRb) - denominator) / denominator > 0.08) return null;
+
+  return { original: rb, corrected: estimatedRb, denominator };
+}
+
 
 async function recognizeBasicDataImage(file, imageNumber) {
   const variants = await createOcrImageVariants(file);
@@ -896,21 +925,57 @@ function dedupeOcrRows(rows) {
 }
 
 function correctSequentialUnitNumbers(rows) {
+  let previousCorrected = 0;
+  let activeOffset = 0;
+
   rows.forEach((row, index) => {
     const original = String(row.unit || "");
-    const previous = numberValue(rows[index - 1]?.unit);
     const current = numberValue(original);
-    const next = numberValue(rows[index + 1]?.unit);
-    if (!shouldTrySequentialUnitCorrection(original, previous, current, next)) return;
+    if (!Number.isFinite(current) || current <= 0) return;
 
-    const expected = previous + 1;
-    const corrected = getUnitCorrectionCandidate(original, expected);
-    if (!corrected) return;
+    let corrected = current;
+    if (previousCorrected) {
+      const blockCandidate = getBlockUnitCorrectionCandidate(current, previousCorrected, activeOffset);
+      if (blockCandidate) {
+        corrected = blockCandidate.value;
+        activeOffset = blockCandidate.offset;
+        row.unit = String(corrected);
+        addOcrCorrectionNotice(row, "台番号ブロック補正あり", `台番号ブロック補正: +${activeOffset} / ${original}→${corrected}`);
+      } else {
+        activeOffset = 0;
+        const next = numberValue(rows[index + 1]?.unit);
+        if (shouldTrySequentialUnitCorrection(original, previousCorrected, current, next)) {
+          const singleCorrected = getUnitCorrectionCandidate(original, previousCorrected + 1);
+          if (singleCorrected) {
+            corrected = singleCorrected;
+            row.unit = String(corrected);
+            addOcrCorrectionNotice(row, "台番号補正あり", `台番号補正: ${original}→${corrected}`);
+          }
+        }
+      }
+    }
 
-    row.unit = String(corrected);
-    addUnitCorrectionNotice(row, original, corrected);
+    previousCorrected = corrected;
   });
   return rows;
+}
+
+function getBlockUnitCorrectionCandidate(current, previousCorrected, activeOffset) {
+  if (activeOffset) {
+    const activeValue = current + activeOffset;
+    if (isPlausibleNextUnit(activeValue, previousCorrected)) return { value: activeValue, offset: activeOffset };
+  }
+  if (current >= previousCorrected) return null;
+
+  return [100, 200, 300, 400]
+    .map((offset) => ({ value: current + offset, offset }))
+    .filter((candidate) => isPlausibleNextUnit(candidate.value, previousCorrected))
+    .sort((a, b) => (a.value - previousCorrected) - (b.value - previousCorrected))[0] || null;
+}
+
+function isPlausibleNextUnit(value, previousCorrected) {
+  const diff = value - previousCorrected;
+  return value > previousCorrected && diff > 0 && diff <= 80;
 }
 
 function shouldTrySequentialUnitCorrection(original, previous, current, next) {
@@ -937,14 +1002,12 @@ function getUnitCorrectionCandidate(original, expected) {
   return 0;
 }
 
-function addUnitCorrectionNotice(row, original, corrected) {
-  const status = "台番号補正あり";
+function addOcrCorrectionNotice(row, status, memo) {
   if (!row.ocrStatus || row.ocrStatus === "OK") row.ocrStatus = `要確認: ${status}`;
   else if (!row.ocrStatus.includes(status)) row.ocrStatus += row.ocrStatus.startsWith("要確認:") ? `・${status}` : ` / ${status}`;
-
-  const memo = `台番号補正: ${original}→${corrected}`;
-  if (!String(row.memo || "").includes(memo)) row.memo = [row.memo, memo].filter(Boolean).join(" / ");
+  if (memo && !String(row.memo || "").includes(memo)) row.memo = [row.memo, memo].filter(Boolean).join(" / ");
 }
+
 
 function readLabelNumber(text, labels) {
   for (const label of labels) {
@@ -977,6 +1040,35 @@ function isLikelyUnitRow(unit, games, bb, rb) {
 
 function refreshDraftEvaluations() {
   [...$("#draftTable tbody").children].forEach((row) => updateDraftRow(row));
+}
+
+function shiftDraftUnitNumbers(offset) {
+  const rows = [...$("#draftTable tbody").children];
+  let changed = 0;
+  rows.forEach((row) => {
+    const input = $(".unit", row);
+    const current = numberValue(input.value);
+    if (!current) return;
+    const next = current + offset;
+    if (next <= 0) return;
+    input.value = String(next);
+    setOcrStatusCell($(".ocr-check", row), "要確認: 台番号一括補正", $(".ocr-check", row)?.dataset.confidence || "");
+    appendDraftMemo(row, `台番号一括補正: ${formatSignedOffset(offset)} / ${current}→${next}`);
+    updateDraftRow(row);
+    changed += 1;
+  });
+  updateDraftHint();
+  if (!changed) alert("補正できる台番号がありません。");
+}
+
+function appendDraftMemo(row, text) {
+  const input = $(".row-memo", row);
+  if (!input || input.value.includes(text)) return;
+  input.value = [input.value.trim(), text].filter(Boolean).join(" / ");
+}
+
+function formatSignedOffset(offset) {
+  return `${offset > 0 ? "+" : ""}${offset}`;
 }
 
 function addDraftRow(seed = {}) {
