@@ -317,13 +317,17 @@ async function recognizeBasicDataTableImage(file, imageNumber, settings) {
   const bitmap = await loadImageBitmap(file);
   const source = drawScaledImage(bitmap, { scale: 2.8 });
   const tableCanvas = cropTableRangeCanvas(source, rangeSettings);
+  const rawTableCanvas = cropTableRangeCanvas(source, rangeSettings, { enhance: false });
   const cells = buildFixedGridCells(tableCanvas, rangeSettings.rows, 5);
   const rows = [];
 
   for (let rowIndex = 0; rowIndex < rangeSettings.rows; rowIndex += 1) {
     const rowCells = cells.slice(rowIndex * 5, rowIndex * 5 + 5);
     updateUploadStatus(`指定範囲セルを数字専用OCRで読み取り中です（${imageNumber} / ${rowIndex + 1}/${rangeSettings.rows}行）...`);
-    const cellResults = await Promise.all(rowCells.map((cell, columnIndex) => recognizeNumericCell(tableCanvas, cell, `${imageNumber} 行${rowIndex + 1} 列${columnIndex + 1}`)));
+    const cellResults = await Promise.all(rowCells.map((cell, columnIndex) => {
+      const label = `${imageNumber} 行${rowIndex + 1} 列${columnIndex + 1}`;
+      return columnIndex === 0 ? recognizeUnitCell(rawTableCanvas, cell, label) : recognizeNumericCell(tableCanvas, cell, label);
+    }));
     const row = buildOcrRowFromCells(cellResults, rowIndex);
     if (row) rows.push(row);
   }
@@ -331,7 +335,7 @@ async function recognizeBasicDataTableImage(file, imageNumber, settings) {
   return dedupeOcrRows(rows);
 }
 
-function cropTableRangeCanvas(source, settings) {
+function cropTableRangeCanvas(source, settings, options = {}) {
   const rect = settingsToCanvasRect(settings, source.width, source.height);
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(rect.width));
@@ -340,6 +344,7 @@ function cropTableRangeCanvas(source, settings) {
   ctx.fillStyle = "white";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(source, rect.left, rect.top, rect.width, rect.height, 0, 0, canvas.width, canvas.height);
+  if (options.enhance === false) return canvas;
   return enhanceCanvas(canvas, { contrast: 1.85, brightness: 12, threshold: 176, invert: false });
 }
 
@@ -541,6 +546,41 @@ async function recognizeNumericCell(source, rect, label) {
   };
 }
 
+async function recognizeUnitCell(source, rect, label) {
+  const variants = createUnitCellOcrVariants(source, rect);
+  const attempts = [];
+  for (const variant of variants) {
+    for (const pageSegMode of ["7", "8"]) {
+      attempts.push({ variant, pageSegMode });
+    }
+  }
+
+  const results = await Promise.all(attempts.map(async ({ variant, pageSegMode }) => {
+    const result = await Tesseract.recognize(variant.source, "eng", {
+      tessedit_pageseg_mode: pageSegMode,
+      tessedit_char_whitelist: "0123456789",
+      preserve_interword_spaces: "0",
+      user_defined_dpi: "300",
+      logger: (progress) => {
+        if (progress.status === "recognizing text") {
+          updateUploadStatus(`台番号セルを専用OCRで読み取り中です（${label} / ${variant.name} / PSM${pageSegMode} ${Math.round(progress.progress * 100)}%）...`);
+        }
+      }
+    });
+    const raw = normalizeOcrText(result.data.text);
+    const digits = (raw.match(/\d+/g) || []).join("");
+    const confidence = Math.max(0, Math.min(100, Math.round(result.data.confidence || 0)));
+    return {
+      value: digits ? numberValue(digits) : 0,
+      text: digits,
+      confidence,
+      score: confidence + (digits ? 10 : -1000) + (digits.length === 3 ? 5 : 0)
+    };
+  }));
+
+  return results.sort((a, b) => b.score - a.score)[0] || { value: 0, text: "", confidence: 0 };
+}
+
 function cropCellCanvas(source, rect) {
   const width = Math.max(1, rect.right - rect.left + 1);
   const height = Math.max(1, rect.bottom - rect.top + 1);
@@ -552,6 +592,29 @@ function cropCellCanvas(source, rect) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(source, rect.left, rect.top, width, height, 9, 9, width, height);
   return enhanceCanvas(canvas, { contrast: 1.7, brightness: 8, threshold: 170, invert: false });
+}
+
+function createUnitCellOcrVariants(source, rect) {
+  const base = cropUnitCellCanvas(source, rect);
+  return [
+    { name: "下線カット", source: enhanceCanvas(base, { contrast: 1.28, brightness: 8, threshold: null, invert: false }) },
+    { name: "薄い二値化", source: enhanceCanvas(base, { contrast: 1.35, brightness: 10, threshold: 142, invert: false }) }
+  ];
+}
+
+function cropUnitCellCanvas(source, rect) {
+  const originalWidth = Math.max(1, rect.right - rect.left + 1);
+  const originalHeight = Math.max(1, rect.bottom - rect.top + 1);
+  const trimBottom = Math.round(originalHeight * 0.14);
+  const height = Math.max(1, originalHeight - trimBottom);
+  const canvas = document.createElement("canvas");
+  canvas.width = originalWidth + 20;
+  canvas.height = height + 16;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, rect.left, rect.top, originalWidth, height, 10, 8, originalWidth, height);
+  return canvas;
 }
 
 function buildOcrRowFromCells(cells, rowIndex) {
@@ -823,12 +886,64 @@ function toOcrRow(unit, games, bb, rb, total) {
 }
 
 function dedupeOcrRows(rows) {
+  const correctedRows = correctSequentialUnitNumbers(rows);
   const byKey = new Map();
-  rows.forEach((row) => {
+  correctedRows.forEach((row) => {
     const key = `${row.unit}-${row.games}-${row.bb}-${row.rb}`;
     if (!byKey.has(key)) byKey.set(key, row);
   });
   return [...byKey.values()].sort((a, b) => Number(a.unit) - Number(b.unit));
+}
+
+function correctSequentialUnitNumbers(rows) {
+  rows.forEach((row, index) => {
+    const original = String(row.unit || "");
+    const previous = numberValue(rows[index - 1]?.unit);
+    const current = numberValue(original);
+    const next = numberValue(rows[index + 1]?.unit);
+    if (!shouldTrySequentialUnitCorrection(original, previous, current, next)) return;
+
+    const expected = previous + 1;
+    const corrected = getUnitCorrectionCandidate(original, expected);
+    if (!corrected) return;
+
+    row.unit = String(corrected);
+    addUnitCorrectionNotice(row, original, corrected);
+  });
+  return rows;
+}
+
+function shouldTrySequentialUnitCorrection(original, previous, current, next) {
+  return /^\d{3}$/.test(original)
+    && original.includes("2")
+    && Number.isFinite(previous)
+    && Number.isFinite(current)
+    && Number.isFinite(next)
+    && previous >= 100
+    && previous <= 999
+    && next >= 100
+    && next <= 999
+    && previous + 2 === next
+    && current !== previous + 1;
+}
+
+function getUnitCorrectionCandidate(original, expected) {
+  if (expected < 100 || expected > 999) return 0;
+  for (let index = 0; index < original.length; index += 1) {
+    if (original[index] !== "2") continue;
+    const candidate = numberValue(`${original.slice(0, index)}5${original.slice(index + 1)}`);
+    if (candidate === expected) return candidate;
+  }
+  return 0;
+}
+
+function addUnitCorrectionNotice(row, original, corrected) {
+  const status = "台番号補正あり";
+  if (!row.ocrStatus || row.ocrStatus === "OK") row.ocrStatus = `要確認: ${status}`;
+  else if (!row.ocrStatus.includes(status)) row.ocrStatus += row.ocrStatus.startsWith("要確認:") ? `・${status}` : ` / ${status}`;
+
+  const memo = `台番号補正: ${original}→${corrected}`;
+  if (!String(row.memo || "").includes(memo)) row.memo = [row.memo, memo].filter(Boolean).join(" / ");
 }
 
 function readLabelNumber(text, labels) {
