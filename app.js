@@ -557,27 +557,24 @@ function analyzeGraphDiff(source, graphRect) {
   const width = imageData.width;
   const height = imageData.height;
   const yellowMask = buildYellowPixelMask(imageData);
-  const yellowTextBlocks = detectYellowTextBlocks(yellowMask, width, height);
-  const yellowByX = new Map();
-  let yellowCount = 0;
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      if (!yellowMask[index] || yellowTextBlocks.some((block) => pointInRect(x, y, block))) continue;
-      yellowCount += 1;
-      if (!yellowByX.has(x)) yellowByX.set(x, []);
-      yellowByX.get(x).push(y);
-    }
-  }
+  const yellowComponents = detectYellowComponents(yellowMask, width, height);
+  const yellowTextBlocks = detectYellowTextBlocks(yellowComponents, width, height);
+  const lineMask = removeYellowTextBlocksFromMask(yellowMask, width, height, yellowTextBlocks);
+  const lineComponents = detectYellowComponents(lineMask, width, height)
+    .filter((component) => !yellowTextBlocks.some((block) => rectsOverlap(component, block, 2)))
+    .filter((component) => isLikelyYellowLineComponent(component, width, height));
 
   const zeroLineY = detectZeroLineY(imageData);
-  const endpoint = detectYellowEndpoint(yellowByX, width);
+  const endpointInfo = detectYellowEndpoint(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
+  const endpoint = endpointInfo?.endpoint || null;
+  const adoptedLineComponent = endpointInfo?.component || null;
   const endpointSide = getEndpointSide(endpoint, zeroLineY);
-  const warnings = [];
+  const yellowCount = lineComponents.reduce((sum, component) => sum + component.pixelCount, 0);
+  const warnings = [...(endpointInfo?.warnings || [])];
   if (zeroLineY === null) warnings.push("0ライン要確認");
   if (!endpoint) warnings.push("終点要確認");
   if (yellowCount < Math.max(25, width * 0.08)) warnings.push("低信頼度");
+  if (!lineComponents.length && yellowComponents.length) warnings.push("ライン成分要確認");
 
   let diff = null;
   if (zeroLineY !== null && endpoint) {
@@ -585,7 +582,12 @@ function analyzeGraphDiff(source, graphRect) {
     const lowerY = height - 3;
     if (endpoint.y < zeroLineY) diff = ((zeroLineY - endpoint.y) / Math.max(1, zeroLineY - upperY)) * 5000;
     else diff = -((endpoint.y - zeroLineY) / Math.max(1, lowerY - zeroLineY)) * 5000;
+    diff = enforceEndpointDiffSign(diff, endpoint, zeroLineY);
     diff = roundEstimatedGraphDiff(diff, endpoint, zeroLineY);
+    if (diff <= -3000 && isSuspiciousNumberEndpoint(endpoint, adoptedLineComponent, yellowComponents, width, height, yellowTextBlocks)) {
+      warnings.push("数字誤認識要確認");
+      diff = null;
+    }
   }
 
   return {
@@ -595,6 +597,9 @@ function analyzeGraphDiff(source, graphRect) {
     endpointSide,
     yellowCount,
     yellowTextBlocks,
+    yellowComponents,
+    lineComponents,
+    adoptedLineComponent,
     warnings,
     status: warnings.length ? `要確認: グラフ推定・${warnings.join("・")}` : "要確認: グラフ推定"
   };
@@ -609,12 +614,25 @@ function buildYellowPixelMask(imageData) {
   return mask;
 }
 
-function detectYellowTextBlocks(yellowMask, width, height) {
-  const components = detectYellowComponents(yellowMask, width, height);
-  const glyphCandidates = components.filter((component) => isLowerRightYellowGlyph(component, width, height));
+function detectYellowTextBlocks(yellowComponents, width, height) {
+  const glyphCandidates = yellowComponents.filter((component) => isLowerRightYellowGlyph(component, width, height));
   return mergeYellowGlyphBlocks(glyphCandidates)
     .filter((component) => isLikelyYellowPayoutText(component, width, height))
-    .map((component) => ({ left: component.left, right: component.right, top: component.top, bottom: component.bottom }));
+    .map((component) => ({ ...component, role: "excluded-text" }));
+}
+
+function removeYellowTextBlocksFromMask(mask, width, height, yellowTextBlocks) {
+  const cleaned = new Uint8Array(mask);
+  yellowTextBlocks.forEach((block) => {
+    const left = Math.max(0, block.left - 1);
+    const right = Math.min(width - 1, block.right + 1);
+    const top = Math.max(0, block.top - 1);
+    const bottom = Math.min(height - 1, block.bottom + 1);
+    for (let y = top; y <= bottom; y += 1) {
+      for (let x = left; x <= right; x += 1) cleaned[y * width + x] = 0;
+    }
+  });
+  return cleaned;
 }
 
 function detectYellowComponents(mask, width, height) {
@@ -623,9 +641,10 @@ function detectYellowComponents(mask, width, height) {
   for (let start = 0; start < mask.length; start += 1) {
     if (!mask[start] || visited[start]) continue;
     const queue = [start];
+    const byX = new Map();
     visited[start] = 1;
     let head = 0;
-    let count = 0;
+    let pixelCount = 0;
     let left = width;
     let right = 0;
     let top = height;
@@ -635,11 +654,13 @@ function detectYellowComponents(mask, width, height) {
       const index = queue[head++];
       const x = index % width;
       const y = Math.floor(index / width);
-      count += 1;
+      pixelCount += 1;
       left = Math.min(left, x);
       right = Math.max(right, x);
       top = Math.min(top, y);
       bottom = Math.max(bottom, y);
+      if (!byX.has(x)) byX.set(x, []);
+      byX.get(x).push(y);
 
       for (let dy = -1; dy <= 1; dy += 1) {
         for (let dx = -1; dx <= 1; dx += 1) {
@@ -655,51 +676,91 @@ function detectYellowComponents(mask, width, height) {
         }
       }
     }
-    components.push({ left, right, top, bottom, count });
+    const componentWidth = right - left + 1;
+    const componentHeight = bottom - top + 1;
+    components.push({
+      left,
+      right,
+      top,
+      bottom,
+      width: componentWidth,
+      height: componentHeight,
+      pixelCount,
+      count: pixelCount,
+      xSpan: componentWidth,
+      ySpan: componentHeight,
+      density: pixelCount / Math.max(1, componentWidth * componentHeight),
+      byX
+    });
   }
   return components;
 }
 
-
 function isLowerRightYellowGlyph(component, width, height) {
-  const rectWidth = component.right - component.left + 1;
-  const rectHeight = component.bottom - component.top + 1;
-  const density = component.count / Math.max(1, rectWidth * rectHeight);
   const centerX = (component.left + component.right) / 2;
   const centerY = (component.top + component.bottom) / 2;
-  return centerX >= width * 0.58
-    && centerY >= height * 0.58
-    && rectHeight >= Math.max(8, height * 0.035)
-    && rectWidth >= 3
-    && density >= 0.10;
+  return centerX >= width * 0.55
+    && centerY >= height * 0.60
+    && component.height >= Math.max(8, height * 0.035)
+    && component.width >= 3
+    && component.density >= 0.10;
 }
 
 function mergeYellowGlyphBlocks(components) {
+  const sorted = components.slice().sort((a, b) => (a.top - b.top) || (a.left - b.left));
   const blocks = [];
-  components.forEach((component) => {
-    const existing = blocks.find((block) => rectsOverlap(block, component, 10));
-    if (existing) {
-      existing.left = Math.min(existing.left, component.left);
-      existing.right = Math.max(existing.right, component.right);
-      existing.top = Math.min(existing.top, component.top);
-      existing.bottom = Math.max(existing.bottom, component.bottom);
-      existing.count += component.count;
-    } else blocks.push({ ...component });
+  sorted.forEach((component) => {
+    const existing = blocks.find((block) => areSamePayoutTextLine(block, component));
+    if (existing) mergeComponentIntoBlock(existing, component);
+    else blocks.push({ ...component, byX: null });
   });
   return blocks;
 }
 
+function areSamePayoutTextLine(a, b) {
+  const verticalOverlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) + 1;
+  const minHeight = Math.min(a.height, b.height);
+  const horizontalGap = Math.max(0, Math.max(a.left, b.left) - Math.min(a.right, b.right) - 1);
+  return verticalOverlap >= minHeight * 0.35 && horizontalGap <= Math.max(18, minHeight * 1.8);
+}
+
+function mergeComponentIntoBlock(block, component) {
+  block.left = Math.min(block.left, component.left);
+  block.right = Math.max(block.right, component.right);
+  block.top = Math.min(block.top, component.top);
+  block.bottom = Math.max(block.bottom, component.bottom);
+  block.pixelCount += component.pixelCount;
+  block.count = block.pixelCount;
+  block.width = block.right - block.left + 1;
+  block.height = block.bottom - block.top + 1;
+  block.xSpan = block.width;
+  block.ySpan = block.height;
+  block.density = block.pixelCount / Math.max(1, block.width * block.height);
+}
+
 function isLikelyYellowPayoutText(component, width, height) {
-  const rectWidth = component.right - component.left + 1;
-  const rectHeight = component.bottom - component.top + 1;
-  const density = component.count / Math.max(1, rectWidth * rectHeight);
   const centerX = (component.left + component.right) / 2;
   const centerY = (component.top + component.bottom) / 2;
-  const inLowerRight = centerX >= width * 0.58 && centerY >= height * 0.58;
-  const largeGlyphBlock = rectWidth >= Math.max(22, width * 0.06) && rectHeight >= Math.max(10, height * 0.045);
-  const textLikeDensity = density >= 0.12;
-  const notThinLine = rectHeight > Math.max(7, height * 0.028) && rectWidth / Math.max(1, rectHeight) < 9;
+  const inLowerRight = centerX >= width * 0.55 && centerY >= height * 0.60;
+  const largeGlyphBlock = component.width >= Math.max(24, width * 0.07) && component.height >= Math.max(10, height * 0.045);
+  const textLikeDensity = component.density >= 0.08;
+  const notThinLine = component.height > Math.max(7, height * 0.028) && component.width / Math.max(1, component.height) < 14;
   return inLowerRight && largeGlyphBlock && textLikeDensity && notThinLine;
+}
+
+function isLikelyYellowLineComponent(component, width, height) {
+  if (component.pixelCount < Math.max(12, width * 0.025)) return false;
+  if (component.xSpan < Math.max(18, width * 0.08)) return false;
+  if (component.height > Math.max(70, height * 0.55)) return false;
+  if (component.density > 0.78 && component.height > Math.max(10, height * 0.045)) return false;
+  if (component.left > width * 0.72) return false;
+  if (component.right < width * 0.45) return false;
+  const centerX = (component.left + component.right) / 2;
+  const centerY = (component.top + component.bottom) / 2;
+  const isolatedLowerRightChunk = centerX >= width * 0.55 && centerY >= height * 0.60 && component.left > width * 0.50 && component.xSpan < width * 0.35;
+  if (isolatedLowerRightChunk) return false;
+  const xsWithEnoughPixels = [...component.byX.values()].filter((ys) => ys.length <= Math.max(16, height * 0.08)).length;
+  return xsWithEnoughPixels >= Math.max(8, component.xSpan * 0.18);
 }
 
 function pointInRect(x, y, rect) {
@@ -717,6 +778,14 @@ function getEndpointSide(endpoint, zeroLineY) {
   return "0ライン上";
 }
 
+function enforceEndpointDiffSign(value, endpoint, zeroLineY) {
+  if (!endpoint || zeroLineY === null) return value;
+  const magnitude = Math.abs(value);
+  if (endpoint.y < zeroLineY && value < 0) return magnitude;
+  if (endpoint.y > zeroLineY && value > 0) return -magnitude;
+  return value;
+}
+
 function roundEstimatedGraphDiff(value, endpoint, zeroLineY) {
   const rounded = Math.round(clamp(value, -5000, 5000) / 50) * 50;
   if (rounded === 0 && endpoint && zeroLineY !== null) {
@@ -724,6 +793,11 @@ function roundEstimatedGraphDiff(value, endpoint, zeroLineY) {
     if (endpoint.y < zeroLineY) return 50;
   }
   return rounded;
+}
+
+function endpointLooksLikeText(endpoint, yellowTextBlocks, width, height) {
+  return endpoint && endpoint.x >= width * 0.55 && endpoint.y >= height * 0.60
+    && yellowTextBlocks.some((block) => rectsOverlap({ left: endpoint.x - 18, right: endpoint.x + 18, top: endpoint.y - 18, bottom: endpoint.y + 18 }, block, 12));
 }
 
 function detectZeroLineY(imageData) {
@@ -767,15 +841,157 @@ function detectZeroLineY(imageData) {
   return Math.round(best.sum / best.count);
 }
 
-function detectYellowEndpoint(yellowByX, width) {
-  const xs = [...yellowByX.keys()].sort((a, b) => a - b);
+function detectYellowEndpoint(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
+  const warnings = [];
+  const candidates = lineComponents
+    .map((component) => ({ component, endpoint: endpointFromLineComponent(component, width) }))
+    .filter((candidate) => candidate.endpoint)
+    .filter((candidate) => !endpointLooksLikeText(candidate.endpoint, yellowTextBlocks, width, height))
+    .sort((a, b) => scoreLineEndpointCandidate(b, width) - scoreLineEndpointCandidate(a, width));
+
+  if (!candidates.length) return { endpoint: null, component: null, warnings };
+
+  let chosen = candidates[0];
+  const safeCandidate = candidates.find((candidate) => !isSuspiciousNumberEndpoint(candidate.endpoint, candidate.component, yellowComponents, width, height, yellowTextBlocks));
+  if (safeCandidate && safeCandidate !== chosen && isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, yellowComponents, width, height, yellowTextBlocks)) {
+    chosen = safeCandidate;
+    warnings.push("数字誤認識再探索");
+  }
+
+  if (isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, yellowComponents, width, height, yellowTextBlocks)) {
+    const rescannedEndpoint = findContinuousEndpointFromRight(chosen.component, width, height, yellowComponents, yellowTextBlocks);
+    if (rescannedEndpoint) {
+      chosen = { ...chosen, endpoint: rescannedEndpoint };
+      warnings.push("右端から再探索");
+    } else {
+      const alternative = candidates.find((candidate) => candidate !== chosen && !isSuspiciousNumberEndpoint(candidate.endpoint, candidate.component, yellowComponents, width, height, yellowTextBlocks));
+      if (alternative) {
+        chosen = alternative;
+        warnings.push("右下数字近傍を除外");
+      } else warnings.push("終点数字近傍要確認");
+    }
+  }
+
+  if (zeroLineY !== null && chosen.endpoint.y > zeroLineY) {
+    const rightEdgeBodyY = rightEdgeMedianY(chosen.component, Math.max(18, Math.round(width * 0.04)));
+    const probablyTextDraggedEndpoint = rightEdgeBodyY !== null && rightEdgeBodyY < zeroLineY && chosen.endpoint.y > zeroLineY;
+    if (probablyTextDraggedEndpoint) {
+      const alternative = candidates.find((candidate) => candidate.endpoint.y <= zeroLineY || candidate.component !== chosen.component);
+      if (alternative) {
+        chosen = alternative;
+        warnings.push("数字誤認識再探索");
+      }
+    }
+  }
+
+  return { endpoint: chosen.endpoint, component: chosen.component, warnings };
+}
+
+
+function isSuspiciousNumberEndpoint(endpoint, component, yellowComponents, width, height, yellowTextBlocks) {
+  if (!endpoint || !component) return false;
+  const inDangerZone = endpoint.x > width * 0.65 && endpoint.y > height * 0.65;
+  if (!inDangerZone) return false;
+  const nearbyLargeBlock = yellowComponents.some((candidate) => {
+    if (candidate === component) return false;
+    const nearEndpoint = rectsOverlap(candidate, { left: endpoint.x - 22, right: endpoint.x + 22, top: endpoint.y - 22, bottom: endpoint.y + 22 }, 8);
+    const largeDense = candidate.width >= Math.max(16, width * 0.045)
+      && candidate.height >= Math.max(8, height * 0.035)
+      && candidate.density >= 0.10;
+    return nearEndpoint && largeDense;
+  });
+  const nearKnownText = endpointLooksLikeText(endpoint, yellowTextBlocks, width, height);
+  const denseCluster = hasDenseYellowClusterNearEndpoint(component, endpoint, width, height);
+  const continuous = hasLineContinuityNearEndpoint(component, endpoint, width);
+  return nearKnownText || nearbyLargeBlock || denseCluster || !continuous;
+}
+
+function hasDenseYellowClusterNearEndpoint(component, endpoint, width, height) {
+  const xRadius = Math.max(10, Math.round(width * 0.025));
+  const yRadius = Math.max(10, Math.round(height * 0.045));
+  let localPixels = 0;
+  let verticalColumns = 0;
+  let horizontalRows = new Map();
+  for (const [x, ys] of component.byX.entries()) {
+    if (Math.abs(x - endpoint.x) > xRadius) continue;
+    const localYs = ys.filter((y) => Math.abs(y - endpoint.y) <= yRadius);
+    if (!localYs.length) continue;
+    localPixels += localYs.length;
+    if (localYs.length >= Math.max(5, yRadius * 0.45)) verticalColumns += 1;
+    localYs.forEach((y) => horizontalRows.set(y, (horizontalRows.get(y) || 0) + 1));
+  }
+  const denseRows = [...horizontalRows.values()].filter((count) => count >= Math.max(8, xRadius * 0.65)).length;
+  const localArea = (xRadius * 2 + 1) * (yRadius * 2 + 1);
+  return localPixels / localArea > 0.16 || verticalColumns >= 3 || denseRows >= 3;
+}
+
+function hasLineContinuityNearEndpoint(component, endpoint, width) {
+  const xs = [...component.byX.keys()].sort((a, b) => a - b);
+  const endpointIndex = xs.findIndex((x) => x >= endpoint.x);
+  const endIndex = endpointIndex < 0 ? xs.length - 1 : endpointIndex;
+  const lookback = Math.max(12, Math.round(width * 0.035));
+  const startX = endpoint.x - lookback;
+  const localXs = xs.filter((x, index) => index <= endIndex && x >= startX && x <= endpoint.x);
+  if (localXs.length < Math.max(5, lookback * 0.35)) return false;
+  let largestGap = 0;
+  for (let i = 1; i < localXs.length; i += 1) largestGap = Math.max(largestGap, localXs[i] - localXs[i - 1]);
+  const medians = localXs.map((x) => median(component.byX.get(x))).filter((value) => Number.isFinite(value));
+  const ySpread = medians.length ? Math.max(...medians) - Math.min(...medians) : Number.POSITIVE_INFINITY;
+  return largestGap <= 4 && ySpread <= Math.max(35, width * 0.08);
+}
+
+function findContinuousEndpointFromRight(component, width, height, yellowComponents, yellowTextBlocks) {
+  const xs = [...component.byX.keys()].sort((a, b) => b - a);
+  for (const x of xs) {
+    const endpoint = endpointFromLineComponentUpToX(component, width, x);
+    if (!endpoint) continue;
+    if (endpoint.x < width * 0.45) return null;
+    if (!isSuspiciousNumberEndpoint(endpoint, component, yellowComponents, width, height, yellowTextBlocks)) return endpoint;
+  }
+  return null;
+}
+
+function endpointFromLineComponentUpToX(component, width, maxX) {
+  const xs = [...component.byX.keys()].filter((x) => x <= maxX).sort((a, b) => a - b);
   if (!xs.length) return null;
   const rightmost = xs.at(-1);
   if (rightmost < width * 0.45) return null;
-  const windowXs = xs.filter((x) => x >= rightmost - 10).slice(-16);
-  const ys = windowXs.map((x) => median(yellowByX.get(x))).filter((value) => Number.isFinite(value));
+  const windowSize = Math.max(5, Math.min(15, Math.round(component.xSpan * 0.12)));
+  const windowXs = xs.filter((x) => x >= rightmost - windowSize).slice(-20);
+  const ys = windowXs.flatMap((x) => component.byX.get(x) || []).filter((value) => Number.isFinite(value));
   if (ys.length < 2) return null;
   return { x: Math.round(median(windowXs)), y: Math.round(median(ys)) };
+}
+
+function endpointFromLineComponent(component, width) {
+  const xs = [...component.byX.keys()].sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const rightmost = xs.at(-1);
+  if (rightmost < width * 0.45) return null;
+  const windowSize = Math.max(5, Math.min(15, Math.round(component.xSpan * 0.12)));
+  const windowXs = xs.filter((x) => x >= rightmost - windowSize).slice(-20);
+  const ys = windowXs
+    .flatMap((x) => component.byX.get(x) || [])
+    .filter((value) => Number.isFinite(value));
+  if (ys.length < 2) return null;
+  return { x: Math.round(median(windowXs)), y: Math.round(median(ys)) };
+}
+
+function scoreLineEndpointCandidate(candidate, width) {
+  const { component, endpoint } = candidate;
+  const rightScore = endpoint.x / Math.max(1, width);
+  const spanScore = Math.min(1, component.xSpan / Math.max(1, width * 0.45));
+  const leftContinuityScore = component.left <= width * 0.35 ? 0.35 : component.left <= width * 0.55 ? 0.18 : -0.25;
+  const densityPenalty = component.density > 0.55 && component.height > 12 ? -0.4 : 0;
+  return rightScore * 2 + spanScore + leftContinuityScore + densityPenalty;
+}
+
+function rightEdgeMedianY(component, span) {
+  const xs = [...component.byX.keys()].sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const rightmost = xs.at(-1);
+  const ys = xs.filter((x) => x >= rightmost - span).flatMap((x) => component.byX.get(x) || []);
+  return median(ys);
 }
 
 function median(values) {
@@ -875,13 +1091,17 @@ function graphResultDebugText(result) {
   const endpointY = result.endpoint ? Math.round(result.endpoint.y) : "要確認";
   const side = result.endpointSide || getEndpointSide(result.endpoint, result.zeroLineY);
   const diff = result.diff === null ? "要確認" : `${formatSignedNumber(result.diff)}枚`;
-  return `0ラインY: ${zero} / 終点Y: ${endpointY} / ${side} / 推定差枚: ${diff}`;
+  const lineStatus = result.adoptedLineComponent ? "ライン成分採用" : "ライン成分要確認";
+  const textStatus = result.yellowTextBlocks?.length ? `数字除外済み ${result.yellowTextBlocks.length}件` : "数字候補なし";
+  return `0ラインY: ${zero} / 終点Y: ${endpointY} / ${side} / 推定差枚: ${diff} / ${lineStatus} / ${textStatus}`;
 }
 
 function drawGraphDebugOverlay(canvas, result) {
   const ctx = canvas.getContext("2d");
   ctx.save();
   ctx.lineWidth = 2;
+  (result.yellowTextBlocks || []).forEach((block) => drawDebugRect(ctx, block, "#ff9f1a", "数字除外"));
+  if (result.adoptedLineComponent) drawDebugRect(ctx, result.adoptedLineComponent, "#39ff14", "ライン成分採用");
   if (result.zeroLineY !== null) {
     ctx.strokeStyle = "#00d5ff";
     ctx.beginPath();
@@ -901,6 +1121,20 @@ function drawGraphDebugOverlay(canvas, result) {
   ctx.fillStyle = "white";
   ctx.font = "16px sans-serif";
   ctx.fillText(result.diff === null ? "差枚要確認" : `${formatSignedNumber(result.diff)}枚 推定`, 14, 26);
+  ctx.restore();
+}
+
+function drawDebugRect(ctx, rect, color, label) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(rect.left, rect.top, rect.right - rect.left + 1, rect.bottom - rect.top + 1);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+  const labelWidth = Math.max(72, label.length * 12);
+  ctx.fillRect(rect.left, Math.max(0, rect.top - 20), labelWidth, 18);
+  ctx.fillStyle = color;
+  ctx.font = "12px sans-serif";
+  ctx.fillText(label, rect.left + 4, Math.max(12, rect.top - 6));
   ctx.restore();
 }
 
