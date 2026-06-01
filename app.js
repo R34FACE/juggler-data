@@ -2143,7 +2143,8 @@ function bindRecords() {
     state.sort.key = key;
     renderRecords();
   });
-  $("#exportRecordsButton").addEventListener("click", () => exportCsv("slot-records.csv", recordsToCsv(state.records)));
+  $("#exportRecordsButton").addEventListener("click", () => exportRecordsCsv("slot-records_latest.csv"));
+  $("#exportRecordsDatedButton").addEventListener("click", () => exportRecordsCsv(`slot-records_${todayString()}.csv`));
   $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
   $("#deleteAllRecordsButton").addEventListener("click", () => {
     if (!confirm("保存データをすべて削除しますか？")) return;
@@ -2665,6 +2666,29 @@ function toCsv(rows) {
     const text = String(cell ?? "");
     return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }).join(",")).join("\n");
+}
+
+function exportRecordsCsv(filename) {
+  const latestDate = latestRecordDate(state.records);
+  const latestText = latestDate || "なし";
+  const message = `保存済みデータ ${state.records.length}件をCSV出力します。最新日：${latestText}`;
+  if (!confirm(message)) return;
+  exportCsv(filename, recordsToCsv(state.records));
+}
+
+function latestRecordDate(records) {
+  return records.reduce((latest, record) => {
+    const date = String(record.date || "");
+    return date && (!latest || date > latest) ? date : latest;
+  }, "");
+}
+
+function todayString() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function exportCsv(filename, csv) {
