@@ -1,13 +1,29 @@
 const STORAGE_KEYS = {
   records: "slotRecords.v1",
   masters: "slotMachineMasters.v1",
-  stores: "slotStores.v1"
+  stores: "slotStores.v1",
+  memoTags: "slotMemoTags.v1"
 };
+
+const INITIAL_MEMO_TAGS = [
+  "ゾロ目",
+  "ジャグラー景品",
+  "旧イベ",
+  "新台入替",
+  "週末",
+  "月末",
+  "LINE示唆",
+  "全体強め",
+  "ジャグラー寄せ",
+  "据え置きっぽい",
+  "上げ狙い"
+];
 
 const state = {
   records: loadJson(STORAGE_KEYS.records, []),
   masters: loadJson(STORAGE_KEYS.masters, []),
   stores: loadJson(STORAGE_KEYS.stores, []),
+  memoTags: loadMemoTags(),
   sort: { key: "date", direction: "desc" },
   analysisSelection: null,
   ocrPreview: { files: [], settings: [], currentIndex: 0, image: null }
@@ -22,6 +38,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindTabs();
   bindDraftTable();
   bindStores();
+  bindMemoTags();
   bindImageUploads();
   bindRecords();
   bindSummary();
@@ -42,6 +59,15 @@ function loadJson(key, fallback) {
 
 function saveJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+function loadMemoTags() {
+  const savedRaw = localStorage.getItem(STORAGE_KEYS.memoTags);
+  if (savedRaw === null) {
+    saveJson(STORAGE_KEYS.memoTags, INITIAL_MEMO_TAGS);
+    return INITIAL_MEMO_TAGS.slice();
+  }
+  return normalizeMemoTags(loadJson(STORAGE_KEYS.memoTags, INITIAL_MEMO_TAGS));
 }
 
 function uid(prefix) {
@@ -114,6 +140,80 @@ function saveStoreName(store) {
   state.stores = unique([...state.stores, trimmed]);
   saveJson(STORAGE_KEYS.stores, state.stores);
   renderOptions();
+}
+
+function bindMemoTags() {
+  $("#saveMemoTagButton").addEventListener("click", () => {
+    const tag = $("#memoTagInput").value.trim();
+    if (!tag) {
+      alert("保存するメモタグを入力してください。");
+      return;
+    }
+    saveMemoTag(tag);
+    $("#memoTagInput").value = "";
+    $("#memoTagSelect").value = tag;
+  });
+
+  $("#addMemoTagButton").addEventListener("click", () => {
+    const tags = getSelectedMemoTags("#memoTagSelect");
+    if (!tags.length) {
+      alert("メモに追加するタグを選択してください。");
+      return;
+    }
+    addTagsToSessionMemo(tags);
+  });
+
+  $("#deleteMemoTagButton").addEventListener("click", () => {
+    const tags = getSelectedMemoTags("#memoTagSelect");
+    if (!tags.length) {
+      alert("削除するメモタグを選択してください。");
+      return;
+    }
+    if (!confirm(`メモタグ「${tags.join("、")}」を削除しますか？保存済みデータは削除されません。`)) return;
+    state.memoTags = state.memoTags.filter((tag) => !tags.includes(tag));
+    saveJson(STORAGE_KEYS.memoTags, state.memoTags);
+    renderOptions();
+  });
+}
+
+function saveMemoTag(tag) {
+  const trimmed = String(tag || "").trim();
+  if (!trimmed) return;
+  state.memoTags = normalizeMemoTags([...state.memoTags, trimmed]);
+  saveJson(STORAGE_KEYS.memoTags, state.memoTags);
+  renderOptions();
+}
+
+function normalizeMemoTags(tags) {
+  return unique((Array.isArray(tags) ? tags : []).map((tag) => String(tag || "").trim()));
+}
+
+function getSelectedMemoTags(selector) {
+  const select = $(selector);
+  if (!select) return [];
+  return [...select.selectedOptions].map((option) => option.value).filter(Boolean);
+}
+
+function addTagsToSessionMemo(tags) {
+  const memoInput = $("#sessionMemo");
+  const currentParts = splitMemoParts(memoInput.value);
+  const additions = tags.filter((tag) => !currentParts.includes(tag));
+  memoInput.value = [...currentParts, ...additions].join(" / ");
+}
+
+function splitMemoParts(memo) {
+  return String(memo || "")
+    .split(/\s*\/\s*/g)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function recordHasMemoTag(record, tag) {
+  return !tag || String(record.memo || "").includes(tag);
+}
+
+function recordHasAllMemoTags(record, tags) {
+  return tags.every((tag) => recordHasMemoTag(record, tag));
 }
 
 function bindImageUploads() {
@@ -2136,7 +2236,7 @@ function numberValue(value) {
 }
 
 function bindRecords() {
-  ["filterDate", "filterStore", "filterMachine", "filterUnit", "filterRating", "filterPositive", "filterAOnly"].forEach((id) => {
+  ["filterDate", "filterStore", "filterMachine", "filterUnit", "filterRating", "filterMemoTag", "filterPositive", "filterAOnly"].forEach((id) => {
     $(`#${id}`).addEventListener("input", renderRecords);
   });
   $("#recordsTable thead").addEventListener("click", (event) => {
@@ -2162,6 +2262,7 @@ function getFilteredRecords() {
   const machine = $("#filterMachine").value.trim();
   const unit = $("#filterUnit").value.trim();
   const rating = $("#filterRating").value;
+  const memoTag = $("#filterMemoTag").value;
   const positive = $("#filterPositive").checked;
   const aOnly = $("#filterAOnly").checked;
 
@@ -2171,6 +2272,7 @@ function getFilteredRecords() {
     if (machine && !record.machine.includes(machine)) return false;
     if (unit && !String(record.unit).includes(unit)) return false;
     if (rating && record.rating !== rating) return false;
+    if (memoTag && !recordHasMemoTag(record, memoTag)) return false;
     if (positive && record.diff <= 0) return false;
     if (aOnly && record.rating !== "A") return false;
     return true;
@@ -2241,7 +2343,7 @@ function deleteRecord(id) {
 }
 
 function bindSummary() {
-  ["summaryGroup", "specialFrom", "specialTo", "specialDay", "specialWeekday", "specialDouble"].forEach((id) => {
+  ["summaryGroup", "specialFrom", "specialTo", "specialDay", "specialWeekday", "specialMemoTag", "specialDouble"].forEach((id) => {
     $(`#${id}`).addEventListener("input", renderSummary);
   });
 }
@@ -2251,6 +2353,7 @@ function specialFilteredRecords() {
   const to = $("#specialTo").value;
   const day = Number($("#specialDay").value);
   const weekday = $("#specialWeekday").value;
+  const memoTag = $("#specialMemoTag").value;
   const double = $("#specialDouble").checked;
   return state.records.filter((record) => {
     const date = new Date(`${record.date}T00:00:00`);
@@ -2258,6 +2361,7 @@ function specialFilteredRecords() {
     if (to && record.date > to) return false;
     if (day && date.getDate() !== day) return false;
     if (weekday !== "" && date.getDay() !== Number(weekday)) return false;
+    if (memoTag && !recordHasMemoTag(record, memoTag)) return false;
     if (double && !isDoubleDay(date)) return false;
     return true;
   });
@@ -2307,6 +2411,7 @@ function buildSpecialSummaryText(records) {
   const day = $("#specialDay").value;
   if (day) conditions.push(`毎月${day}日`);
   if ($("#specialDouble").checked) conditions.push("ゾロ目日");
+  if ($("#specialMemoTag").value) conditions.push(`メモ:${$("#specialMemoTag").value}`);
   const weekday = $("#specialWeekday");
   if (weekday.value !== "") conditions.push(`${weekday.options[weekday.selectedIndex].text}曜日`);
   return `検索条件：${conditions.join("・") || "全データ"} / 対象件数：${stats.count}件 / A評価：${stats.aCount}件 / 平均合算：${rateText(stats.avgTotalRate)} / 平均REG：${rateText(stats.avgRbRate)} / プラス台割合：${stats.positiveRate}%`;
@@ -2603,6 +2708,7 @@ function renderRecommendations() {
   const targetDate = $("#recommendDate").value;
   const store = $("#recommendStore").value.trim();
   const machine = $("#recommendMachine").value.trim();
+  const memoTags = getSelectedMemoTags("#recommendMemoTags");
   const target = new Date(`${targetDate}T00:00:00`);
   const day = target.getDate();
   const weekday = target.getDay();
@@ -2622,18 +2728,21 @@ function renderRecommendations() {
     const sameDay = items.filter((record) => new Date(`${record.date}T00:00:00`).getDate() === day);
     const sameWeekday = items.filter((record) => new Date(`${record.date}T00:00:00`).getDay() === weekday);
     const sameDouble = double ? items.filter((record) => isDoubleDay(new Date(`${record.date}T00:00:00`))) : [];
+    const memoMatched = memoTags.length ? items.filter((record) => recordHasAllMemoTags(record, memoTags)) : [];
+    const memoMatchedA = memoMatched.filter((record) => record.rating === "A");
     const aCount = items.filter((record) => record.rating === "A").length;
     const strongReg = items.filter((record) => record.rbRate && record.rbRate <= 300 && record.games >= 3000).length;
     const recent = items.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3);
     const recentDip = recent.some((record) => record.diff < -1000);
 
-    score += sameDay.length * 10 + sameWeekday.length * 4 + sameDouble.length * 8 + aCount * 12 + strongReg * 8;
+    score += sameDay.length * 10 + sameWeekday.length * 4 + sameDouble.length * 8 + memoMatched.length * 10 + memoMatchedA.length * 14 + aCount * 12 + strongReg * 8;
     if (recentDip) score += 9;
     if (latest.rating === "A") score += 6;
     if (latest.diff < -1000) score += 5;
 
     if (sameDay.length) reasons.push(`同じ${day}日の履歴が${sameDay.length}件`);
     if (double && sameDouble.length) reasons.push(`ゾロ目日の履歴あり`);
+    if (memoTags.length && memoMatched.length) reasons.push(`過去の${memoTags.join("＋")}日に${memoMatchedA.length ? "A評価あり" : `${memoMatched.length}件の履歴あり`}`);
     if (aCount) reasons.push(`A評価が${aCount}回`);
     if (strongReg) reasons.push(`高回転でREGが強い履歴あり`);
     if (recentDip) reasons.push(`直近で凹み後の候補`);
@@ -2844,10 +2953,28 @@ function renderAll() {
 function renderOptions() {
   const stores = unique(state.stores);
   const machines = unique([...state.records.map((record) => record.machine), ...state.masters.map((master) => master.name)]);
+  const memoTags = normalizeMemoTags(state.memoTags);
+  state.memoTags = memoTags;
   $("#storeList").innerHTML = stores.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
   $("#storeSelect").innerHTML = `<option value="">店舗を選択</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
   $("#machineList").innerHTML = machines.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+  renderMemoTagSelect("#memoTagSelect", memoTags, "保存済みタグを選択");
+  renderMemoTagSelect("#filterMemoTag", memoTags, "すべて");
+  renderMemoTagSelect("#specialMemoTag", memoTags, "すべて");
+  renderMemoTagSelect("#recommendMemoTags", memoTags);
 }
+
+function renderMemoTagSelect(selector, tags, emptyLabel) {
+  const select = $(selector);
+  if (!select) return;
+  const current = new Set([...select.selectedOptions].map((option) => option.value));
+  const emptyOption = emptyLabel === undefined ? "" : `<option value="">${escapeHtml(emptyLabel)}</option>`;
+  select.innerHTML = `${emptyOption}${tags.map((tag) => `<option value="${escapeHtml(tag)}">${escapeHtml(tag)}</option>`).join("")}`;
+  [...select.options].forEach((option) => {
+    option.selected = current.has(option.value);
+  });
+}
+
 
 function renderRanking(target, items) {
   target.innerHTML = "";
