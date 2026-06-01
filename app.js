@@ -565,7 +565,7 @@ function analyzeGraphDiff(source, graphRect) {
     .filter((component) => isLikelyYellowLineComponent(component, width, height));
 
   const zeroLineY = detectZeroLineY(imageData);
-  const endpointInfo = detectYellowEndpoint(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
+  const endpointInfo = detectYellowEndpoint(lineComponents, lineMask, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
   const endpoint = endpointInfo?.endpoint || null;
   const adoptedLineComponent = endpointInfo?.component || null;
   const endpointSide = getEndpointSide(endpoint, zeroLineY);
@@ -624,10 +624,13 @@ function detectYellowTextBlocks(yellowComponents, width, height) {
 function removeYellowTextBlocksFromMask(mask, width, height, yellowTextBlocks) {
   const cleaned = new Uint8Array(mask);
   yellowTextBlocks.forEach((block) => {
-    const left = Math.max(0, block.left - 1);
-    const right = Math.min(width - 1, block.right + 1);
-    const top = Math.max(0, block.top - 1);
-    const bottom = Math.min(height - 1, block.bottom + 1);
+    const lowerRightBlock = block.left >= width * 0.50 && block.top >= height * 0.55;
+    const xPadding = lowerRightBlock ? Math.max(6, Math.round(width * 0.015)) : 1;
+    const yPadding = lowerRightBlock ? Math.max(8, Math.round(height * 0.035)) : 1;
+    const left = Math.max(0, block.left - xPadding);
+    const right = Math.min(width - 1, block.right + xPadding);
+    const top = Math.max(0, block.top - yPadding);
+    const bottom = Math.min(height - 1, block.bottom + yPadding);
     for (let y = top; y <= bottom; y += 1) {
       for (let x = left; x <= right; x += 1) cleaned[y * width + x] = 0;
     }
@@ -800,6 +803,84 @@ function endpointLooksLikeText(endpoint, yellowTextBlocks, width, height) {
     && yellowTextBlocks.some((block) => rectsOverlap({ left: endpoint.x - 18, right: endpoint.x + 18, top: endpoint.y - 18, bottom: endpoint.y + 18 }, block, 12));
 }
 
+function buildYellowLineProfile(lineMask, width, height) {
+  const profile = new Array(width).fill(null);
+  const maxLineColumnPixels = Math.max(18, Math.round(height * 0.12));
+  for (let x = 0; x < width; x += 1) {
+    const ys = [];
+    for (let y = 0; y < height; y += 1) {
+      if (lineMask[y * width + x]) ys.push(y);
+    }
+    if (!ys.length || ys.length > maxLineColumnPixels) continue;
+    profile[x] = { x, medianY: median(ys), count: ys.length };
+  }
+  return profile;
+}
+
+function findRightmostContinuousLineRun(profile, options = {}) {
+  const gapTolerance = options.gapTolerance ?? 6;
+  const yJumpTolerance = options.yJumpTolerance ?? 35;
+  const minRunWidth = options.minRunWidth ?? 5;
+  let run = [];
+  let gap = 0;
+  let previous = null;
+
+  const finishRun = () => {
+    if (!run.length) return null;
+    const left = Math.min(...run.map((entry) => entry.x));
+    const right = Math.max(...run.map((entry) => entry.x));
+    const width = right - left + 1;
+    if (width < minRunWidth && run.length < minRunWidth) return null;
+    const rightSide = run.filter((entry) => entry.x >= right - Math.max(2, minRunWidth - 1));
+    const endpointYs = rightSide.map((entry) => entry.medianY);
+    return {
+      left,
+      right,
+      width,
+      points: run.slice(),
+      endpoint: { x: right, y: Math.round(median(endpointYs)) }
+    };
+  };
+
+  for (let x = profile.length - 1; x >= 0; x -= 1) {
+    const entry = profile[x];
+    if (!entry) {
+      if (run.length) {
+        gap += 1;
+        if (gap > gapTolerance) {
+          const result = finishRun();
+          if (result) return result;
+          run = [];
+          previous = null;
+          gap = 0;
+        }
+      }
+      continue;
+    }
+
+    if (previous && Math.abs(entry.medianY - previous.medianY) > yJumpTolerance) {
+      const result = finishRun();
+      if (result) return result;
+      run = [];
+    }
+    run.push(entry);
+    previous = entry;
+    gap = 0;
+  }
+  return finishRun();
+}
+
+function findComponentForProfileRun(lineComponents, run, width, height) {
+  if (!run?.endpoint) return null;
+  const yTolerance = Math.max(8, Math.round(height * 0.035));
+  const xPadding = 6;
+  return lineComponents.find((component) => {
+    if (component.right < run.left - xPadding || component.left > run.right + xPadding) return false;
+    const nearbyXs = [...component.byX.keys()].filter((x) => x >= run.endpoint.x - xPadding && x <= run.endpoint.x + xPadding);
+    return nearbyXs.some((x) => Math.abs(median(component.byX.get(x)) - run.endpoint.y) <= yTolerance);
+  }) || lineComponents.find((component) => component.left <= run.right && component.right >= run.left) || null;
+}
+
 function detectZeroLineY(imageData) {
   const { width, height, data } = imageData;
   const candidates = [];
@@ -841,8 +922,18 @@ function detectZeroLineY(imageData) {
   return Math.round(best.sum / best.count);
 }
 
-function detectYellowEndpoint(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
+function detectYellowEndpoint(lineComponents, lineMask, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
   const warnings = [];
+  const profile = buildYellowLineProfile(lineMask, width, height);
+  const rightmostRun = findRightmostContinuousLineRun(profile);
+  if (rightmostRun?.endpoint && !endpointLooksLikeText(rightmostRun.endpoint, yellowTextBlocks, width, height)) {
+    return {
+      endpoint: rightmostRun.endpoint,
+      component: findComponentForProfileRun(lineComponents, rightmostRun, width, height),
+      warnings
+    };
+  }
+
   const candidates = lineComponents
     .map((component) => ({ component, endpoint: endpointFromLineComponent(component, width) }))
     .filter((candidate) => candidate.endpoint)
@@ -1873,10 +1964,15 @@ function addDraftRow(seed = {}) {
   $(".games", row).value = seed.games ?? "";
   $(".bb", row).value = seed.bb ?? "";
   $(".rb", row).value = seed.rb ?? "";
-  $(".diff", row).value = seed.diff ?? "";
+  const diffInput = $(".diff", row);
+  diffInput.value = seed.diff ?? "";
   setOcrStatusCell($(".ocr-check", row), seed.ocrStatus, seed.ocrConfidence);
   $(".row-memo", row).value = seed.memo ?? "";
   row.addEventListener("input", () => updateDraftRow(row));
+  diffInput.addEventListener("blur", () => {
+    diffInput.value = normalizeDiffInputValue(diffInput.value);
+    updateDraftRow(row);
+  });
   $(".remove-row", row).addEventListener("click", () => {
     row.remove();
     if (!$("#draftTable tbody").children.length) addDraftRow();
@@ -2015,12 +2111,23 @@ function ocrStatusBadge(status, confidence) {
   return `<span class="ocr-badge ${className}">${escapeHtml(detail)}</span>`;
 }
 
-function numberValue(value) {
-  const normalized = String(value ?? "")
+function normalizeNumberText(value) {
+  return String(value ?? "")
     .replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
-    .replace(/[−ー－―]/g, "-")
+    .replace(/[−ー－―ｰ–—‐-]/g, "-")
     .replace(/,/g, "")
     .trim();
+}
+
+function normalizeDiffInputValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const normalized = normalizeNumberText(raw);
+  return /^-?\d+$/.test(normalized) ? normalized : raw;
+}
+
+function numberValue(value) {
+  const normalized = normalizeNumberText(value);
   const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : 0;
 }
