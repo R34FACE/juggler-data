@@ -367,6 +367,18 @@ main {
   font-size: 13px;
 }
 
+.csv-export-note {
+  background: #fff8e8;
+  border: 1px solid #ead3a5;
+  border-radius: 8px;
+  color: #725018;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.6;
+  margin: -4px 0 14px;
+  padding: 10px 12px;
+}
+
 .summary-banner,
 .summary-card,
 .rank-item {

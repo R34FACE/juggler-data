@@ -181,10 +181,12 @@
       </div>
 
       <div class="action-row">
-        <button id="exportRecordsButton" type="button">CSV出力</button>
+        <button id="exportLatestRecordsButton" type="button">最新版CSV出力</button>
+        <button class="secondary" id="exportDatedRecordsButton" type="button">日付付きCSV出力</button>
         <label class="file-button">CSV取込<input type="file" id="importRecordsInput" accept=".csv,text/csv"></label>
         <button class="danger subtle" id="deleteAllRecordsButton" type="button">全削除</button>
       </div>
+      <p class="csv-export-note">スマホのブラウザによっては、同名ファイルでも自動上書きされず、(1) 付きで保存される場合があります。</p>
 
       <div class="table-wrap">
         <table class="data-table compact" id="recordsTable">
