@@ -2144,7 +2144,11 @@ function bindRecords() {
     renderRecords();
   });
   $("#exportRecordsButton").addEventListener("click", () => exportCsv("slot-records.csv", recordsToCsv(state.records)));
-  $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
+  $("#importRecordsInput").addEventListener("change", (event) => {
+    importRecordsCsv(event.target.files[0]).finally(() => {
+      event.target.value = "";
+    });
+  });
   $("#deleteAllRecordsButton").addEventListener("click", () => {
     if (!confirm("保存データをすべて削除しますか？")) return;
     state.records = [];
@@ -2708,36 +2712,100 @@ function parseCsv(text) {
   return rows;
 }
 
+function buildRecordDuplicateKey(record) {
+  return [record.date, record.store, record.machine, record.unit]
+    .map((value) => String(value ?? "").trim())
+    .join("\u001f");
+}
+
+function createRecordFromCsvRow(row) {
+  return {
+    id: uid("record"),
+    date: row[0] || "",
+    store: row[1] || "",
+    machine: row[2] || "",
+    unit: row[3] || "",
+    games: numberValue(row[4]),
+    bb: numberValue(row[5]),
+    rb: numberValue(row[6]),
+    bbRate: numberValue(row[7]) || null,
+    rbRate: numberValue(row[8]) || null,
+    totalRate: numberValue(row[9]) || null,
+    diff: numberValue(row[10]),
+    rating: row[11] || "要確認",
+    expectation: numberValue(row[12]),
+    confidence: row[13] || "低",
+    reason: row[14] || "",
+    nearestSettings: row[15] || "-",
+    memo: row[16] || "",
+    createdAt: row[17] || new Date().toISOString()
+  };
+}
+
+function chooseDuplicateImportAction(duplicateCount) {
+  if (!duplicateCount) return "add";
+  const choice = prompt(
+    `重複データが${duplicateCount}件あります。処理を選択してください。\n` +
+      "1: 上書きする\n" +
+      "2: 取り込まない\n" +
+      "3: 別データとして追加する",
+    "1"
+  );
+  if (choice === null) return "cancel";
+  const normalized = choice.trim();
+  if (normalized === "1" || normalized === "上書き" || normalized === "上書きする") return "overwrite";
+  if (normalized === "2" || normalized === "取り込まない" || normalized === "スキップ") return "skip";
+  if (normalized === "3" || normalized === "追加" || normalized === "別データとして追加する") return "add";
+  alert("1、2、3のいずれかを入力してください。CSV取込を中止しました。");
+  return "cancel";
+}
+
 function importRecordsCsv(file) {
-  if (!file) return;
-  file.text().then((text) => {
+  if (!file) return Promise.resolve();
+  return file.text().then((text) => {
     const [, ...rows] = parseCsv(text.replace(/^\ufeff/, ""));
-    rows.forEach((row) => {
-      const record = {
-        id: uid("record"),
-        date: row[0] || "",
-        store: row[1] || "",
-        machine: row[2] || "",
-        unit: row[3] || "",
-        games: numberValue(row[4]),
-        bb: numberValue(row[5]),
-        rb: numberValue(row[6]),
-        bbRate: numberValue(row[7]) || null,
-        rbRate: numberValue(row[8]) || null,
-        totalRate: numberValue(row[9]) || null,
-        diff: numberValue(row[10]),
-        rating: row[11] || "要確認",
-        expectation: numberValue(row[12]),
-        confidence: row[13] || "低",
-        reason: row[14] || "",
-        nearestSettings: row[15] || "-",
-        memo: row[16] || "",
-        createdAt: row[17] || new Date().toISOString()
-      };
-      state.records.push(record);
+    const importedRecords = rows.map(createRecordFromCsvRow);
+    const duplicateMap = new Map();
+    state.records.forEach((record, index) => {
+      const key = buildRecordDuplicateKey(record);
+      if (!key) return;
+      const duplicate = duplicateMap.get(key);
+      if (duplicate) duplicate.extraIndices.push(index);
+      else duplicateMap.set(key, { record, index, extraIndices: [] });
     });
+
+    const duplicates = importedRecords.filter((record) => duplicateMap.has(buildRecordDuplicateKey(record)));
+    const action = chooseDuplicateImportAction(duplicates.length);
+    if (action === "cancel") return;
+
+    let addedCount = 0;
+    let overwrittenCount = 0;
+    let skippedCount = 0;
+    const duplicateIndexesToRemove = new Set();
+
+    importedRecords.forEach((record) => {
+      const duplicate = duplicateMap.get(buildRecordDuplicateKey(record));
+      if (!duplicate || action === "add") {
+        state.records.push(record);
+        addedCount += 1;
+        return;
+      }
+      if (action === "skip") {
+        skippedCount += 1;
+        return;
+      }
+      state.records[duplicate.index] = { ...record, id: duplicate.record.id };
+      duplicate.extraIndices.forEach((index) => duplicateIndexesToRemove.add(index));
+      overwrittenCount += 1;
+    });
+
+    if (duplicateIndexesToRemove.size) {
+      state.records = state.records.filter((_, index) => !duplicateIndexesToRemove.has(index));
+    }
+
     saveJson(STORAGE_KEYS.records, state.records);
     renderAll();
+    alert(`CSV取込が完了しました。追加: ${addedCount}件 / 上書き: ${overwrittenCount}件 / 未取込: ${skippedCount}件`);
   });
 }
 
