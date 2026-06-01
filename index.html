@@ -357,6 +357,15 @@
 
       <div class="meta-grid">
         <label>予想日付<input type="date" id="recommendDate"></label>
+        <label>特定日タイプ
+          <select id="recommendSpecialType">
+            <option value="normal">通常日</option>
+            <option value="same-day">毎月同じ日付</option>
+            <option value="double">ゾロ目日</option>
+            <option value="same-weekday">同じ曜日</option>
+            <option value="recent-dip">直近凹み狙い</option>
+          </select>
+        </label>
         <label>店舗<input id="recommendStore" list="storeList" placeholder="全店舗"></label>
         <label>機種<input id="recommendMachine" list="machineList" placeholder="全機種"></label>
         <label>メモタグ条件
@@ -366,6 +375,7 @@
       <div class="action-row">
         <button id="makeRecommendButton" type="button">おすすめを表示</button>
       </div>
+      <div class="summary-banner" id="recommendSummary">条件を指定すると、保存済みデータからおすすめ台ランキングを表示します。</div>
       <div class="ranking-list" id="recommendList"></div>
     </section>
 

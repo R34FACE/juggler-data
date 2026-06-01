@@ -2860,30 +2860,41 @@ function percentage(part, total) {
 }
 
 function bindRecommendations() {
+  ["recommendDate", "recommendSpecialType", "recommendStore", "recommendMachine", "recommendMemoTags"].forEach((id) => {
+    const element = $(`#${id}`);
+    if (!element) return;
+    element.addEventListener("input", renderRecommendations);
+    element.addEventListener("change", renderRecommendations);
+  });
   $("#makeRecommendButton").addEventListener("click", renderRecommendations);
 }
 
 function renderRecommendations() {
   const targetDate = $("#recommendDate").value;
+  const specialType = $("#recommendSpecialType")?.value || "normal";
   const store = $("#recommendStore").value.trim();
   const machine = $("#recommendMachine").value.trim();
   const memoTags = getSelectedMemoTags("#recommendMemoTags");
-  const target = new Date(`${targetDate}T00:00:00`);
+  const target = targetDate ? new Date(`${targetDate}T00:00:00`) : new Date();
 
   const base = state.records.filter((record) => {
     if (store && record.store !== store) return false;
     if (machine && record.machine !== machine) return false;
     if (targetDate && record.date >= targetDate) return false;
+    if (memoTags.length && !memoTags.some((tag) => recordHasMemoTag(record, tag))) return false;
     return true;
   });
 
+  const context = buildRecommendationContext(target, specialType, { targetDate, store, machine, memoTags, count: base.length });
   const byUnit = groupBy(base, (record) => `${record.store}__${record.machine}__${record.unit}`);
   const candidates = Object.values(byUnit)
-    .map((items) => buildRecommendationCandidate(items, target, base))
+    .map((items) => buildRecommendationCandidate(items, context, base))
     .sort((a, b) => b.score - a.score || b.stats.count - a.stats.count || String(a.unit).localeCompare(String(b.unit), "ja"))
     .slice(0, 10)
     .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
 
+  const summary = $("#recommendSummary");
+  if (summary) summary.textContent = buildRecommendationSummary(context, base.length, candidates.length);
   renderRecommendationRanking($("#recommendList"), candidates.length ? candidates : [{
     empty: true,
     title: "候補なし",
@@ -2892,51 +2903,108 @@ function renderRecommendations() {
   }]);
 }
 
-function buildRecommendationCandidate(items, target, base) {
-  const sorted = items.slice().sort((a, b) => b.date.localeCompare(a.date));
-  const latest = sorted[0];
+function buildRecommendationContext(target, specialType, filters) {
   const day = target.getDate();
   const weekday = target.getDay();
-  const double = isDoubleDay(target);
-  const sameDay = items.filter((record) => new Date(`${record.date}T00:00:00`).getDate() === day);
-  const sameWeekday = items.filter((record) => new Date(`${record.date}T00:00:00`).getDay() === weekday);
-  const sameDouble = double ? items.filter((record) => isDoubleDay(new Date(`${record.date}T00:00:00`))) : [];
+  const targetIsDouble = isDoubleDay(target);
+  const activeType = specialType === "normal" && targetIsDouble ? "double" : specialType;
+  const multipliers = {
+    sameDay: activeType === "same-day" ? 1.7 : activeType === "normal" ? 1.2 : 1,
+    weekday: activeType === "same-weekday" ? 1.7 : activeType === "normal" ? 1.15 : 1,
+    double: activeType === "double" ? 1.9 : targetIsDouble ? 1.45 : 0.75,
+    recentDip: activeType === "recent-dip" ? 1.9 : activeType === "normal" ? 1.25 : 1,
+    stable: activeType === "recent-dip" ? 0.85 : 1
+  };
+  return { target, day, weekday, targetIsDouble, specialType, activeType, multipliers, filters };
+}
+
+function buildRecommendationSummary(context, recordCount, candidateCount) {
+  const labels = {
+    normal: "通常日",
+    "same-day": "毎月同じ日付",
+    double: "ゾロ目日",
+    "same-weekday": "同じ曜日",
+    "recent-dip": "直近凹み狙い"
+  };
+  const focus = [];
+  if (context.activeType === "double") focus.push("ゾロ目日の過去実績を強めに評価");
+  if (context.activeType === "same-day" || context.activeType === "normal") focus.push(`過去の毎月${context.day}日を評価`);
+  if (context.activeType === "same-weekday" || context.activeType === "normal") focus.push(`${weekdayName(context.weekday)}曜日のREG・差枚傾向を評価`);
+  if (context.activeType === "recent-dip" || context.activeType === "normal") focus.push("直近3回差枚と大きな凹みを評価");
+  if (context.specialType === "normal" && context.targetIsDouble) focus.push("指定日がゾロ目日のため自動でゾロ目比重を上乗せ");
+  const filterText = [
+    context.filters.store ? `店舗:${context.filters.store}` : "全店舗",
+    context.filters.machine ? `機種:${context.filters.machine}` : "全機種",
+    context.filters.memoTags.length ? `メモ:${context.filters.memoTags.join("、")}` : "メモ指定なし"
+  ].join(" / ");
+  return `特定日タイプ：${labels[context.specialType] || "通常日"} / ${filterText} / 対象${recordCount}件 / 候補${candidateCount}台。${focus.join("、")}します。`;
+}
+
+function buildRecommendationCandidate(items, context, base) {
+  const sorted = items.slice().sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0];
+  const { day, weekday, multipliers, targetIsDouble } = context;
+  const sameDay = items.filter((record) => getRecordDate(record).getDate() === day);
+  const sameWeekday = items.filter((record) => getRecordDate(record).getDay() === weekday);
+  const doubleDay = items.filter((record) => isDoubleDay(getRecordDate(record)));
+  const sameDouble = targetIsDouble || context.activeType === "double" ? doubleDay : [];
   const recent = sorted.slice(0, 3);
   const stats = calculateStats(items);
   const sameDayStats = calculateStats(sameDay);
   const sameWeekdayStats = calculateStats(sameWeekday);
   const sameDoubleStats = calculateStats(sameDouble);
   const recentDiffTotal = recent.reduce((sum, record) => sum + Number(record.diff || 0), 0);
-  const recentBigDip = recent.some((record) => record.diff <= -1000);
-  const latestBigDip = latest.diff <= -1000;
+  const recentBigDipCount = recent.filter((record) => Number(record.diff || 0) <= -1000).length;
+  const latestBigDip = Number(latest.diff || 0) <= -1000;
+  const rbGoodCount = items.filter(isGoodRbRecord).length;
+  const sameDayRbGoodCount = sameDay.filter(isGoodRbRecord).length;
+  const sameWeekdayRbGoodCount = sameWeekday.filter(isGoodRbRecord).length;
+  const doubleRbGoodCount = sameDouble.filter(isGoodRbRecord).length;
   const bandItems = getSameBandRecords(latest, base);
   const bandStats = calculateStats(bandItems);
+  const bandAcount = bandItems.filter((record) => record.rating === "A").length;
+  const bandRbGoodCount = bandItems.filter(isGoodRbRecord).length;
   const scoreParts = [];
 
-  addScorePart(scoreParts, sameDay.length * 8, sameDay.length ? `毎月${day}日の実績${sameDay.length}件` : "");
-  addScorePart(scoreParts, sameDayStats.aCount * 6, sameDayStats.aCount ? `毎月${day}日のA評価${sameDayStats.aCount}回` : "");
-  addScorePart(scoreParts, sameDayStats.avgDiff > 0 ? 5 : 0, sameDayStats.avgDiff > 0 ? `毎月${day}日の平均差枚 ${formatDiff(sameDayStats.avgDiff)}` : "");
-  addScorePart(scoreParts, sameWeekday.length * 3, sameWeekday.length ? `${weekdayName(weekday)}曜日の実績${sameWeekday.length}件` : "");
-  addScorePart(scoreParts, sameWeekdayStats.avgRbRate && sameWeekdayStats.avgRbRate <= 330 ? 8 : 0, sameWeekdayStats.avgRbRate && sameWeekdayStats.avgRbRate <= 330 ? `同曜日の平均REG ${rateText(sameWeekdayStats.avgRbRate)}` : "");
-  addScorePart(scoreParts, sameDouble.length * 7, double && sameDouble.length ? `ゾロ目日の実績${sameDouble.length}件` : "");
-  addScorePart(scoreParts, sameDoubleStats.aCount * 6, double && sameDoubleStats.aCount ? `ゾロ目日のA評価${sameDoubleStats.aCount}回` : "");
-  addScorePart(scoreParts, stats.aCount * 10, stats.aCount ? `A評価${stats.aCount}回` : "");
-  addScorePart(scoreParts, stats.avgRbRate && stats.avgRbRate <= 300 ? 16 : stats.avgRbRate && stats.avgRbRate <= 330 ? 10 : 0, stats.avgRbRate && stats.avgRbRate <= 330 ? `平均REG ${rateText(stats.avgRbRate)}` : "");
-  addScorePart(scoreParts, stats.avgTotalRate && stats.avgTotalRate <= 145 ? 12 : stats.avgTotalRate && stats.avgTotalRate <= 155 ? 7 : 0, stats.avgTotalRate && stats.avgTotalRate <= 155 ? `平均合算 ${rateText(stats.avgTotalRate)}` : "");
-  addScorePart(scoreParts, stats.avgDiff > 500 ? 10 : stats.avgDiff > 0 ? 5 : 0, stats.avgDiff > 0 ? `平均差枚 ${formatDiff(stats.avgDiff)}` : "");
-  addScorePart(scoreParts, stats.positiveRate >= 60 ? 8 : stats.positiveRate >= 50 ? 4 : 0, stats.positiveRate >= 50 ? `プラス率${stats.positiveRate}%` : "");
-  addScorePart(scoreParts, recentDiffTotal <= -2000 ? 12 : recentDiffTotal <= -1000 ? 7 : 0, recentDiffTotal <= -1000 ? `直近3回差枚合計 ${formatDiff(recentDiffTotal)}` : "");
-  addScorePart(scoreParts, recentBigDip ? 9 : 0, recentBigDip ? "直近で大きく凹みあり" : "");
-  addScorePart(scoreParts, latestBigDip ? 5 : 0, latestBigDip ? `最新履歴が${formatDiff(latest.diff)}で上げ狙い候補` : "");
+  addScorePart(scoreParts, sameDay.length * 6 * multipliers.sameDay, sameDay.length ? `毎月${day}日の実績${sameDay.length}件` : "");
+  addScorePart(scoreParts, sameDayStats.aCount * 8 * multipliers.sameDay, sameDayStats.aCount ? `毎月${day}日のA評価${sameDayStats.aCount}回` : "");
+  addScorePart(scoreParts, sameDayRbGoodCount * 4 * multipliers.sameDay, sameDayRbGoodCount ? `毎月${day}日のREG良好${sameDayRbGoodCount}回` : "");
+  addScorePart(scoreParts, sameDayStats.avgDiff > 0 ? 6 * multipliers.sameDay : 0, sameDayStats.avgDiff > 0 ? `毎月${day}日の平均差枚 ${formatDiff(sameDayStats.avgDiff)}` : "");
+
+  addScorePart(scoreParts, sameWeekday.length * 3 * multipliers.weekday, sameWeekday.length ? `${weekdayName(weekday)}曜日の実績${sameWeekday.length}件` : "");
+  addScorePart(scoreParts, sameWeekdayStats.aCount * 5 * multipliers.weekday, sameWeekdayStats.aCount ? `${weekdayName(weekday)}曜日のA評価${sameWeekdayStats.aCount}回` : "");
+  addScorePart(scoreParts, sameWeekdayRbGoodCount * 5 * multipliers.weekday, sameWeekdayRbGoodCount ? `同曜日のREG良好${sameWeekdayRbGoodCount}回` : "");
+  addScorePart(scoreParts, sameWeekdayStats.avgRbRate && sameWeekdayStats.avgRbRate <= 330 ? 10 * multipliers.weekday : 0, sameWeekdayStats.avgRbRate && sameWeekdayStats.avgRbRate <= 330 ? `同曜日の平均REG ${rateText(sameWeekdayStats.avgRbRate)}` : "");
+
+  addScorePart(scoreParts, sameDouble.length * 6 * multipliers.double, sameDouble.length ? `ゾロ目日の実績${sameDouble.length}件` : "");
+  addScorePart(scoreParts, sameDoubleStats.aCount * 9 * multipliers.double, sameDoubleStats.aCount ? `ゾロ目日のA評価${sameDoubleStats.aCount}回` : "");
+  addScorePart(scoreParts, doubleRbGoodCount * 5 * multipliers.double, doubleRbGoodCount ? `ゾロ目日のREG良好${doubleRbGoodCount}回` : "");
+  addScorePart(scoreParts, sameDoubleStats.avgDiff > 0 ? 8 * multipliers.double : 0, sameDoubleStats.avgDiff > 0 ? `ゾロ目日の平均差枚 ${formatDiff(sameDoubleStats.avgDiff)}` : "");
+
+  addScorePart(scoreParts, stats.aCount * 9 * multipliers.stable, stats.aCount ? `台番号ごとのA評価${stats.aCount}回` : "");
+  addScorePart(scoreParts, rbGoodCount * 5 * multipliers.stable, rbGoodCount ? `RB確率良好${rbGoodCount}回` : "");
+  addScorePart(scoreParts, stats.avgRbRate && stats.avgRbRate <= 300 ? 16 * multipliers.stable : stats.avgRbRate && stats.avgRbRate <= 330 ? 10 * multipliers.stable : 0, stats.avgRbRate && stats.avgRbRate <= 330 ? `平均REG ${rateText(stats.avgRbRate)}` : "");
+  addScorePart(scoreParts, stats.avgTotalRate && stats.avgTotalRate <= 145 ? 10 * multipliers.stable : stats.avgTotalRate && stats.avgTotalRate <= 155 ? 6 * multipliers.stable : 0, stats.avgTotalRate && stats.avgTotalRate <= 155 ? `平均合算 ${rateText(stats.avgTotalRate)}` : "");
+  addScorePart(scoreParts, stats.avgDiff > 500 ? 12 * multipliers.stable : stats.avgDiff > 0 ? 6 * multipliers.stable : 0, stats.avgDiff > 0 ? `平均差枚 ${formatDiff(stats.avgDiff)}` : "");
+  addScorePart(scoreParts, stats.positiveRate >= 60 ? 10 * multipliers.stable : stats.positiveRate >= 50 ? 5 * multipliers.stable : 0, stats.positiveRate >= 50 ? `プラス率${stats.positiveRate}%` : "");
+
+  addScorePart(scoreParts, recentDiffTotal <= -2000 ? 14 * multipliers.recentDip : recentDiffTotal <= -1000 ? 8 * multipliers.recentDip : 0, recentDiffTotal <= -1000 ? `直近3回差枚合計 ${formatDiff(recentDiffTotal)}` : "");
+  addScorePart(scoreParts, recentBigDipCount ? recentBigDipCount * 7 * multipliers.recentDip : 0, recentBigDipCount ? `直近で大きく凹み${recentBigDipCount}回` : "");
+  addScorePart(scoreParts, latestBigDip ? 6 * multipliers.recentDip : 0, latestBigDip ? `最新履歴が${formatDiff(latest.diff)}で上げ候補` : "");
+
   addScorePart(scoreParts, bandStats.count >= 3 && bandStats.avgDiff > 0 ? 8 : 0, bandStats.count >= 3 && bandStats.avgDiff > 0 ? `同じ番号帯平均 ${formatDiff(bandStats.avgDiff)}` : "");
-  addScorePart(scoreParts, bandStats.count >= 3 && bandStats.positiveRate >= 60 ? 5 : 0, bandStats.count >= 3 && bandStats.positiveRate >= 60 ? `同じ番号帯プラス率${bandStats.positiveRate}%` : "");
+  addScorePart(scoreParts, bandStats.count >= 3 && bandStats.positiveRate >= 60 ? 6 : 0, bandStats.count >= 3 && bandStats.positiveRate >= 60 ? `同じ番号帯プラス率${bandStats.positiveRate}%` : "");
+  addScorePart(scoreParts, bandAcount >= 2 ? 5 : 0, bandAcount >= 2 ? `同じ番号帯A評価${bandAcount}回` : "");
+  addScorePart(scoreParts, bandRbGoodCount >= 2 ? 4 : 0, bandRbGoodCount >= 2 ? `同じ番号帯REG良好${bandRbGoodCount}回` : "");
 
   const penaltyParts = [];
   addScorePart(penaltyParts, stats.count <= 2 ? -10 : 0, stats.count <= 2 ? "データ件数が少ない" : "");
-  addScorePart(penaltyParts, stats.avgDiff < 0 ? -6 : 0, stats.avgDiff < 0 ? "平均差枚は弱め" : "");
+  addScorePart(penaltyParts, stats.avgDiff < -500 ? -8 : stats.avgDiff < 0 ? -4 : 0, stats.avgDiff < 0 ? "平均差枚は弱め" : "");
   addScorePart(penaltyParts, stats.aCount === 0 ? -6 : 0, stats.aCount === 0 ? "A評価回数が少ない" : "");
   addScorePart(penaltyParts, !stats.avgRbRate || stats.avgRbRate > 360 ? -8 : 0, !stats.avgRbRate || stats.avgRbRate > 360 ? "REG実績が不足" : "");
-  addScorePart(penaltyParts, recent.length && recentDiffTotal > 0 ? -4 : 0, recent.length && recentDiffTotal > 0 ? "直近もプラスのため上げ狙いとしては弱い" : "");
+  addScorePart(penaltyParts, context.activeType === "recent-dip" && recent.length && recentDiffTotal > 0 ? -8 : recent.length && recentDiffTotal > 0 ? -3 : 0, recent.length && recentDiffTotal > 0 ? "直近もプラスのため上げ狙いとしては弱い" : "");
+  addScorePart(penaltyParts, context.activeType === "double" && !sameDouble.length ? -8 : 0, context.activeType === "double" && !sameDouble.length ? "ゾロ目日の台別実績がない" : "");
+  addScorePart(penaltyParts, context.activeType === "same-day" && !sameDay.length ? -6 : 0, context.activeType === "same-day" && !sameDay.length ? `毎月${day}日の台別実績がない` : "");
 
   const score = Math.max(0, Math.round([...scoreParts, ...penaltyParts].reduce((sum, part) => sum + part.points, 0)));
   return {
@@ -2944,34 +3012,52 @@ function buildRecommendationCandidate(items, target, base) {
     unit: latest.unit,
     machine: latest.machine,
     store: latest.store,
-    rating: score >= 70 ? "A" : score >= 38 ? "B" : "C",
+    rating: score >= 75 ? "A" : score >= 42 ? "B" : "C",
     score,
     stats,
+    averageDiff: stats.avgDiff,
+    averageRbRate: stats.avgRbRate,
+    recentDiffTotal,
     confidence: confidenceByCount(stats.count),
-    reason: buildRecommendationReason(scoreParts, stats, sameDayStats, sameDoubleStats, bandStats),
+    reason: buildRecommendationReason(scoreParts, stats, sameDayStats, sameWeekdayStats, sameDoubleStats, bandStats, { context, recentDiffTotal, recentBigDipCount, latestBigDip }),
     concerns: buildRecommendationConcerns(penaltyParts, stats),
     recentHistory: recent.map(formatRecentHistory)
   };
 }
 
-function addScorePart(parts, points, label) {
-  if (!points || !label) return;
-  parts.push({ points, label });
+function getRecordDate(record) {
+  return new Date(`${record.date}T00:00:00`);
 }
 
-function buildRecommendationReason(scoreParts, stats, sameDayStats, sameDoubleStats, bandStats) {
+function isGoodRbRecord(record) {
+  return Number(record.rbRate || 0) > 0 && Number(record.rbRate) <= 330 && Number(record.games || 0) >= 2500;
+}
+
+function addScorePart(parts, points, label) {
+  if (!points || !label) return;
+  parts.push({ points: Math.round(points), label });
+}
+
+function buildRecommendationReason(scoreParts, stats, sameDayStats, sameWeekdayStats, sameDoubleStats, bandStats, detail) {
   const positives = scoreParts.filter((part) => part.points > 0).sort((a, b) => b.points - a.points).map((part) => part.label);
-  if (!positives.length) return "スコア加点は少ないですが、保存データの比較対象として候補に残ります。";
-  const selected = positives.slice(0, 4);
+  const phrases = positives.slice(0, 4);
+  if (sameDayStats.count && sameDayStats.aCount) phrases.unshift(`毎月${detail.context.day}日の実績あり`);
+  if ((detail.context.activeType === "double" || detail.context.targetIsDouble) && sameDoubleStats.count) phrases.unshift(`ゾロ目日でA評価${sameDoubleStats.aCount}回`);
+  if (sameWeekdayStats.avgRbRate && sameWeekdayStats.avgRbRate <= 330) phrases.push(`同曜日のREG実績が強い`);
+  if (bandStats.count >= 3 && bandStats.avgDiff > 0) phrases.push(`番号帯平均もプラス`);
+  if (detail.latestBigDip || detail.recentBigDipCount) phrases.push(`直近${formatDiff(detail.recentDiffTotal)}で上げ狙い候補`);
+  if (stats.avgDiff < 0 && (detail.latestBigDip || detail.recentDiffTotal <= -1000)) phrases.push("平均差枚は弱いが、直近凹みから上げ狙い候補");
+  const selected = uniqueKeepOrder(phrases).slice(0, 5);
+  if (!selected.length) return "スコア加点は少ないですが、保存データの比較対象として候補に残ります。";
   const details = [];
   if (stats.avgRbRate) details.push(`平均REG ${rateText(stats.avgRbRate)}`);
-  if (stats.avgTotalRate) details.push(`平均合算 ${rateText(stats.avgTotalRate)}`);
   details.push(`平均差枚 ${formatDiff(stats.avgDiff)}`);
   details.push(`プラス率${stats.positiveRate}%`);
-  if (sameDayStats.count) details.push(`同日付平均 ${formatDiff(sameDayStats.avgDiff)}`);
-  if (sameDoubleStats.count) details.push(`ゾロ目日A評価${sameDoubleStats.aCount}回`);
-  if (bandStats.count >= 3) details.push(`番号帯平均 ${formatDiff(bandStats.avgDiff)}`);
-  return `${selected.join("、")}が主な加点です。${details.join(" / ")}。`;
+  return `${selected.join("、")}。${details.join(" / ")}。`;
+}
+
+function uniqueKeepOrder(items) {
+  return [...new Set(items.filter(Boolean))];
 }
 
 function buildRecommendationConcerns(penaltyParts, stats) {
@@ -3023,13 +3109,17 @@ function renderRecommendationRanking(target, items) {
     } else {
       article.innerHTML = `
         <div class="rank-title">
-          <strong>${item.rank}位：${escapeHtml(item.unit)}番 ${escapeHtml(item.machine)}</strong>
+          <strong>${item.rank}位：${escapeHtml(item.unit)}番</strong>
           ${ratingPill(item.rating)}
         </div>
         <div class="recommend-meta">
           <span>店舗：${escapeHtml(item.store)}</span>
+          <span>機種：${escapeHtml(item.machine)}</span>
           <span>おすすめ度：${escapeHtml(item.rating)}</span>
           <span>スコア：${item.score}</span>
+          <span>平均差枚：${formatDiff(item.averageDiff)}</span>
+          <span>平均RB確率：${rateText(item.averageRbRate)}</span>
+          <span>直近3回差枚：${formatDiff(item.recentDiffTotal)}</span>
           <span>信頼度：${escapeHtml(item.confidence)}（${item.stats.count}件）</span>
         </div>
         <div class="recommend-block">

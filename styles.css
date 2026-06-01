@@ -455,6 +455,42 @@ main {
   line-height: 1.55;
 }
 
+
+.recommend-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.recommend-meta span {
+  background: var(--soft);
+  border: 1px solid #c9ddd3;
+  border-radius: 999px;
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 5px 9px;
+}
+
+.recommend-block {
+  display: grid;
+  gap: 4px;
+}
+
+.recommend-block strong {
+  font-size: 13px;
+}
+
+.recommend-block ul {
+  color: var(--muted);
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+.recommend-block.concern p {
+  color: var(--warn);
+}
+
 .master-form {
   background: var(--panel);
   border: 1px solid var(--line);
