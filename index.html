@@ -19,6 +19,7 @@
     <button class="tab-button active" data-tab="input">入力</button>
     <button class="tab-button" data-tab="records">一覧</button>
     <button class="tab-button" data-tab="summary">集計</button>
+    <button class="tab-button" data-tab="analysis">見える化</button>
     <button class="tab-button" data-tab="recommend">おすすめ</button>
     <button class="tab-button" data-tab="masters">機種</button>
   </nav>
@@ -61,6 +62,24 @@
           メモ
           <input id="sessionMemo" placeholder="イベント日、島の状況など">
         </label>
+        <div class="memo-tag-panel wide">
+          <div class="memo-tag-entry">
+            <label>メモタグ入力
+              <input id="memoTagInput" placeholder="例：ゾロ目">
+            </label>
+            <button class="secondary" id="saveMemoTagButton" type="button">保存</button>
+          </div>
+          <div class="memo-tag-entry">
+            <label>保存済みメモタグ
+              <select id="memoTagSelect" multiple size="5" aria-label="保存済みメモタグ"></select>
+            </label>
+            <div class="memo-tag-actions">
+              <button id="addMemoTagButton" type="button">メモに追加</button>
+              <button class="danger subtle" id="deleteMemoTagButton" type="button">削除</button>
+            </div>
+          </div>
+          <p class="muted">複数選択して「メモに追加」できます。既存メモは上書きせず、「 / 」区切りで重複しないように追加します。</p>
+        </div>
       </form>
 
       <div class="upload-grid">
@@ -176,6 +195,11 @@
             <option value="要確認">要確認</option>
           </select>
         </label>
+        <label>メモタグ
+          <select id="filterMemoTag">
+            <option value="">すべて</option>
+          </select>
+        </label>
         <label class="check"><input type="checkbox" id="filterPositive"> 差枚プラスのみ</label>
         <label class="check"><input type="checkbox" id="filterAOnly"> A評価のみ</label>
       </div>
@@ -240,6 +264,11 @@
             <option value="6">土</option>
           </select>
         </label>
+        <label>メモタグ
+          <select id="specialMemoTag">
+            <option value="">すべて</option>
+          </select>
+        </label>
         <label class="check"><input type="checkbox" id="specialDouble"> ゾロ目日</label>
       </div>
 
@@ -247,6 +276,77 @@
       <div class="summary-grid" id="summaryCards"></div>
       <h3 class="subhead">高評価台ランキング</h3>
       <div class="ranking-list" id="summaryRanking"></div>
+    </section>
+
+
+    <section class="panel" id="tab-analysis">
+      <div class="section-head">
+        <h2>見える化ダッシュボード</h2>
+        <p>保存済みデータから店舗・機種・台番号・特定日の傾向をカード型で確認し、狙い台予測に活用します。</p>
+      </div>
+
+      <div class="filter-grid">
+        <label>店舗
+          <select id="analysisStore"><option value="">全店舗</option></select>
+        </label>
+        <label>機種
+          <select id="analysisMachine"><option value="">全機種</option></select>
+        </label>
+        <label>開始日<input type="date" id="analysisFrom"></label>
+        <label>終了日<input type="date" id="analysisTo"></label>
+        <label>番号帯グループ
+          <select id="analysisRangeMode">
+            <option value="10">10台単位</option>
+            <option value="custom">任意範囲</option>
+          </select>
+        </label>
+        <label>任意範囲<input id="analysisCustomRanges" placeholder="例：485-493,528-537"></label>
+      </div>
+
+      <div class="analysis-kpis" id="analysisKpis"></div>
+
+      <h3 class="subhead">台番号別ヒートマップ</h3>
+      <div class="analysis-heatmap" id="unitHeatmap"></div>
+
+      <section class="analysis-detail" id="unitDetailPanel">
+        <div class="section-head compact-head">
+          <h3>台番号詳細履歴</h3>
+          <p id="unitDetailHint">ヒートマップの台番号を押すと時系列履歴を表示します。</p>
+        </div>
+        <div id="unitSignals" class="signal-list"></div>
+        <div class="table-wrap">
+          <table class="data-table compact analysis-history-table">
+            <thead>
+              <tr>
+                <th>日付</th><th>店舗</th><th>機種</th><th>差枚</th><th>G数</th><th>BB</th><th>RB</th><th>合算</th><th>評価</th><th>メモ</th>
+              </tr>
+            </thead>
+            <tbody id="unitHistoryBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <h3 class="subhead">日付・曜日・特定日分析</h3>
+      <div class="analysis-section-grid">
+        <section class="analysis-block">
+          <h4>毎月の日付別</h4>
+          <div class="analysis-list" id="dayOfMonthAnalysis"></div>
+        </section>
+        <section class="analysis-block">
+          <h4>曜日別</h4>
+          <div class="analysis-list" id="weekdayAnalysis"></div>
+        </section>
+        <section class="analysis-block">
+          <h4>ゾロ目日</h4>
+          <div class="analysis-list" id="doubleDayAnalysis"></div>
+        </section>
+      </div>
+
+      <h3 class="subhead">番号帯分析</h3>
+      <div class="analysis-list range-list" id="rangeAnalysis"></div>
+
+      <h3 class="subhead">狙い台ランキング</h3>
+      <div class="ranking-list" id="analysisRanking"></div>
     </section>
 
     <section class="panel" id="tab-recommend">
@@ -259,6 +359,9 @@
         <label>予想日付<input type="date" id="recommendDate"></label>
         <label>店舗<input id="recommendStore" list="storeList" placeholder="全店舗"></label>
         <label>機種<input id="recommendMachine" list="machineList" placeholder="全機種"></label>
+        <label>メモタグ条件
+          <select id="recommendMemoTags" multiple size="4" aria-label="おすすめに使うメモタグ"></select>
+        </label>
       </div>
       <div class="action-row">
         <button id="makeRecommendButton" type="button">おすすめを表示</button>
