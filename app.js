@@ -1964,10 +1964,15 @@ function addDraftRow(seed = {}) {
   $(".games", row).value = seed.games ?? "";
   $(".bb", row).value = seed.bb ?? "";
   $(".rb", row).value = seed.rb ?? "";
-  $(".diff", row).value = seed.diff ?? "";
+  const diffInput = $(".diff", row);
+  diffInput.value = seed.diff ?? "";
   setOcrStatusCell($(".ocr-check", row), seed.ocrStatus, seed.ocrConfidence);
   $(".row-memo", row).value = seed.memo ?? "";
   row.addEventListener("input", () => updateDraftRow(row));
+  diffInput.addEventListener("blur", () => {
+    diffInput.value = normalizeDiffInputValue(diffInput.value);
+    updateDraftRow(row);
+  });
   $(".remove-row", row).addEventListener("click", () => {
     row.remove();
     if (!$("#draftTable tbody").children.length) addDraftRow();
@@ -2106,12 +2111,23 @@ function ocrStatusBadge(status, confidence) {
   return `<span class="ocr-badge ${className}">${escapeHtml(detail)}</span>`;
 }
 
-function numberValue(value) {
-  const normalized = String(value ?? "")
+function normalizeNumberText(value) {
+  return String(value ?? "")
     .replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
-    .replace(/[−ー－―]/g, "-")
+    .replace(/[−ー－―ｰ–—‐-]/g, "-")
     .replace(/,/g, "")
     .trim();
+}
+
+function normalizeDiffInputValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const normalized = normalizeNumberText(raw);
+  return /^-?\d+$/.test(normalized) ? normalized : raw;
+}
+
+function numberValue(value) {
+  const normalized = normalizeNumberText(value);
   const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : 0;
 }
