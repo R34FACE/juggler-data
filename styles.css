@@ -249,6 +249,18 @@ main {
   margin: 14px 0;
 }
 
+.notice-text {
+  background: #fff8e6;
+  border: 1px solid #ead69a;
+  border-radius: 8px;
+  color: #6d5311;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.6;
+  margin: -4px 0 14px;
+  padding: 10px 12px;
+}
+
 .file-button input {
   display: none;
 }
