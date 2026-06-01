@@ -9,6 +9,7 @@ const state = {
   masters: loadJson(STORAGE_KEYS.masters, []),
   stores: loadJson(STORAGE_KEYS.stores, []),
   sort: { key: "date", direction: "desc" },
+  analysisSelection: null,
   ocrPreview: { files: [], settings: [], currentIndex: 0, image: null }
 };
 
@@ -24,6 +25,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindImageUploads();
   bindRecords();
   bindSummary();
+  bindAnalysis();
   bindRecommendations();
   bindMasters();
   addDraftRow();
@@ -50,6 +52,7 @@ function initializeDates() {
   const today = new Date().toISOString().slice(0, 10);
   $("#inputDate").value = today;
   $("#recommendDate").value = today;
+  if ($("#analysisTo")) $("#analysisTo").value = today;
 }
 
 function bindTabs() {
@@ -2330,6 +2333,268 @@ function calculateStats(records) {
   };
 }
 
+
+function bindAnalysis() {
+  ["analysisStore", "analysisMachine", "analysisFrom", "analysisTo", "analysisRangeMode", "analysisCustomRanges"].forEach((id) => {
+    $(`#${id}`).addEventListener("input", () => {
+      state.analysisSelection = null;
+      renderAnalysis();
+    });
+  });
+  $("#unitHeatmap").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-unit-key]");
+    if (!button) return;
+    state.analysisSelection = button.dataset.unitKey;
+    renderAnalysis();
+    $("#unitDetailPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+function getAnalysisRecords() {
+  const store = $("#analysisStore").value;
+  const machine = $("#analysisMachine").value;
+  const from = $("#analysisFrom").value;
+  const to = $("#analysisTo").value;
+  return state.records.filter((record) => {
+    if (store && record.store !== store) return false;
+    if (machine && record.machine !== machine) return false;
+    if (from && record.date < from) return false;
+    if (to && record.date > to) return false;
+    return true;
+  });
+}
+
+function renderAnalysis() {
+  if (!$("#analysisStore")) return;
+  renderAnalysisOptions();
+  const records = getAnalysisRecords();
+  renderAnalysisKpis(records);
+  renderUnitHeatmap(records);
+  renderUnitDetail(records);
+  renderSpecialDateAnalysis(records);
+  renderRangeAnalysis(records);
+  renderAnalysisRanking(records);
+}
+
+function renderAnalysisOptions() {
+  const currentStore = $("#analysisStore").value;
+  const currentMachine = $("#analysisMachine").value;
+  const stores = unique(state.records.map((record) => record.store));
+  const machines = unique(state.records.map((record) => record.machine));
+  $("#analysisStore").innerHTML = `<option value="">全店舗</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+  $("#analysisMachine").innerHTML = `<option value="">全機種</option>${machines.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+  if (stores.includes(currentStore)) $("#analysisStore").value = currentStore;
+  if (machines.includes(currentMachine)) $("#analysisMachine").value = currentMachine;
+}
+
+function renderAnalysisKpis(records) {
+  const stats = calculateStats(records);
+  const dates = records.map((record) => record.date).sort();
+  const latestDate = dates[dates.length - 1] || "-";
+  const cards = [
+    ["対象データ", `${stats.count}件`, `直近日 ${latestDate}`],
+    ["平均差枚", formatDiff(stats.avgDiff), `プラス率 ${stats.positiveRate}%`],
+    ["平均RB", rateText(stats.avgRbRate), `平均合算 ${rateText(stats.avgTotalRate)}`],
+    ["A評価", `${stats.aCount}件`, `A評価率 ${percentage(stats.aCount, stats.count)}%`]
+  ];
+  $("#analysisKpis").innerHTML = cards.map(([label, value, note]) => `
+    <article class="analysis-kpi"><span>${label}</span><strong>${value}</strong><p>${note}</p></article>
+  `).join("");
+}
+
+function renderUnitHeatmap(records) {
+  const target = $("#unitHeatmap");
+  const grouped = Object.values(groupBy(records, unitGroupKey)).map(buildUnitStats).sort(compareUnitStats);
+  if (!grouped.length) {
+    target.innerHTML = `<div class="empty-card">条件に合う保存データがありません。</div>`;
+    return;
+  }
+  target.innerHTML = grouped.map((stats) => {
+    const classes = ["heatmap-card", stats.avgDiff >= 0 ? "diff-plus" : "diff-minus"];
+    if (stats.avgRbRate && stats.avgRbRate <= 300) classes.push("rb-strong");
+    if (stats.aCount >= 2) classes.push("a-strong");
+    if (state.analysisSelection === stats.key) classes.push("selected");
+    return `
+      <button class="${classes.join(" ")}" data-unit-key="${escapeHtml(stats.key)}" type="button">
+        <span class="heatmap-unit">${escapeHtml(stats.unit)}番</span>
+        <span class="heatmap-sub">${escapeHtml(stats.store)} / ${escapeHtml(stats.machine)}</span>
+        <span class="heatmap-main">平均差枚 ${formatDiff(stats.avgDiff)}</span>
+        <span>件数 ${stats.count} / 平均G ${stats.avgGames}</span>
+        <span>プラス ${stats.positiveRate}% / A ${stats.aCount}回</span>
+        <span>BB ${rateText(stats.avgBbRate)} / RB ${rateText(stats.avgRbRate)} / 合算 ${rateText(stats.avgTotalRate)}</span>
+        <span>直近 ${formatDiff(stats.latestDiff)} / 直近3回 ${formatDiff(stats.recent3Diff)}</span>
+      </button>
+    `;
+  }).join("");
+}
+
+function renderUnitDetail(records) {
+  const grouped = groupBy(records, unitGroupKey);
+  const selected = state.analysisSelection && grouped[state.analysisSelection]
+    ? state.analysisSelection
+    : Object.keys(grouped).sort((a, b) => compareUnitStats(buildUnitStats(grouped[a]), buildUnitStats(grouped[b])))[0];
+  state.analysisSelection = selected || null;
+  const items = selected ? grouped[selected].slice().sort((a, b) => b.date.localeCompare(a.date)) : [];
+  const latest = items[0];
+  $("#unitDetailHint").textContent = latest ? `${latest.store} / ${latest.machine} / ${latest.unit}番の履歴（新しい順）` : "ヒートマップの台番号を押すと時系列履歴を表示します。";
+  $("#unitSignals").innerHTML = latest ? buildUnitSignals(items).map((text) => `<span class="signal-chip">${escapeHtml(text)}</span>`).join("") : "";
+  $("#unitHistoryBody").innerHTML = items.map((record) => `
+    <tr>
+      <td>${escapeHtml(record.date)}</td><td>${escapeHtml(record.store)}</td><td>${escapeHtml(record.machine)}</td>
+      <td>${formatDiff(record.diff)}</td><td>${Number(record.games || 0).toLocaleString()}</td><td>${record.bb || 0}</td><td>${record.rb || 0}</td>
+      <td>${rateText(record.totalRate)}</td><td>${ratingPill(record.rating)}</td><td>${escapeHtml(record.memo || "")}</td>
+    </tr>
+  `).join("");
+}
+
+function renderSpecialDateAnalysis(records) {
+  const dayEntries = Array.from({ length: 31 }, (_, index) => index + 1).map((day) => [`${day}日`, records.filter((record) => recordDate(record).getDate() === day)]);
+  const weekdayLabels = ["日", "月", "火", "水", "木", "金", "土"];
+  const weekdayEntries = weekdayLabels.map((label, index) => [`${label}曜日`, records.filter((record) => recordDate(record).getDay() === index)]);
+  const doubleItems = records.filter((record) => isDoubleDay(recordDate(record)));
+  renderAnalysisStatList($("#dayOfMonthAnalysis"), dayEntries, { limit: 31 });
+  renderAnalysisStatList($("#weekdayAnalysis"), weekdayEntries, { limit: 7 });
+  renderAnalysisStatList($("#doubleDayAnalysis"), [["ゾロ目日", doubleItems], ["通常日", records.filter((record) => !isDoubleDay(recordDate(record)))]]);
+}
+
+function renderAnalysisStatList(target, entries, options = {}) {
+  const rows = entries.map(([label, items]) => ({ label, items, stats: calculateStats(items) }))
+    .filter((row) => row.stats.count > 0)
+    .sort((a, b) => b.stats.avgDiff - a.stats.avgDiff)
+    .slice(0, options.limit || 12);
+  target.innerHTML = rows.length ? rows.map(({ label, stats }) => analysisStatRow(label, stats)).join("") : `<div class="empty-card">該当データなし</div>`;
+}
+
+function analysisStatRow(label, stats) {
+  const strength = stats.avgDiff >= 500 || stats.positiveRate >= 60 || percentage(stats.aCount, stats.count) >= 30 ? "strong" : stats.avgDiff < 0 ? "weak" : "normal";
+  return `
+    <article class="analysis-row ${strength}">
+      <strong>${escapeHtml(label)}</strong>
+      <span>対象 ${stats.count}台</span>
+      <span>平均差枚 ${formatDiff(stats.avgDiff)}</span>
+      <span>プラス ${stats.positiveRate}%</span>
+      <span>平均RB ${rateText(stats.avgRbRate)}</span>
+      <span>A評価率 ${percentage(stats.aCount, stats.count)}%</span>
+    </article>
+  `;
+}
+
+function renderRangeAnalysis(records) {
+  const ranges = buildUnitRanges(records);
+  $("#rangeAnalysis").innerHTML = ranges.length ? ranges.map(({ label, items }) => analysisStatRow(label, calculateStats(items))).join("") : `<div class="empty-card">番号帯を作れるデータがありません。</div>`;
+}
+
+function renderAnalysisRanking(records) {
+  const ranges = buildUnitRanges(records);
+  const rangeByUnit = new Map();
+  ranges.forEach(({ label, items }) => items.forEach((record) => rangeByUnit.set(unitGroupKey(record), { label, stats: calculateStats(items) })));
+  const grouped = Object.values(groupBy(records, unitGroupKey));
+  const candidates = grouped.map((items) => buildAimCandidate(items, rangeByUnit.get(unitGroupKey(items[0]))))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+  renderRanking($("#analysisRanking"), candidates.length ? candidates.map((item, index) => ({
+    title: `${index + 1}位：${item.latest.unit}番 ${item.latest.machine}（${item.score}pt）`,
+    rating: item.score >= 70 ? "A" : item.score >= 42 ? "B" : "C",
+    body: `${item.latest.store}。理由：${item.reasons.join("＋") || "履歴少なめ"}。直近 ${formatDiff(item.latest.diff)} / 番号帯 ${item.rangeLabel || "未分類"}`
+  })) : [{ title: "候補なし", rating: "要確認", body: "条件に合う保存データがありません。" }]);
+}
+
+function buildAimCandidate(items, rangeInfo) {
+  const sorted = items.slice().sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0];
+  const day = recordDate(latest).getDate();
+  const weekday = recordDate(latest).getDay();
+  const sameDay = items.filter((record) => recordDate(record).getDate() === day);
+  const sameWeekday = items.filter((record) => recordDate(record).getDay() === weekday);
+  const doubleItems = items.filter((record) => isDoubleDay(recordDate(record)));
+  const aCount = items.filter((record) => record.rating === "A").length;
+  const strongReg = items.filter((record) => record.rbRate && record.rbRate <= 300 && record.games >= 2500).length;
+  const recent3 = sorted.slice(0, 3);
+  const recentDip = recent3.reduce((sum, record) => sum + Number(record.diff || 0), 0) <= -1000 || latest.diff <= -1000;
+  const rangeStrong = rangeInfo?.stats?.avgDiff > 0 || rangeInfo?.stats?.positiveRate >= 55;
+  let score = sameDay.length * 8 + sameWeekday.length * 4 + doubleItems.length * 6 + aCount * 12 + strongReg * 10;
+  if (recentDip) score += 14;
+  if (rangeStrong) score += 12;
+  const reasons = [];
+  if (recentDip) reasons.push("直近凹み");
+  if (sameDay.length >= 2) reasons.push("同日付実績");
+  if (sameWeekday.length >= 2) reasons.push("同曜日実績");
+  if (doubleItems.length) reasons.push("ゾロ目日実績");
+  if (aCount) reasons.push(`A評価${aCount}回`);
+  if (strongReg) reasons.push("RB確率強め");
+  if (rangeStrong) reasons.push("番号帯強め");
+  return { latest, score, reasons, rangeLabel: rangeInfo?.label || "" };
+}
+
+function buildUnitStats(items) {
+  const sorted = items.slice().sort((a, b) => b.date.localeCompare(a.date));
+  const stats = calculateStats(items);
+  return {
+    ...stats,
+    key: unitGroupKey(items[0]),
+    store: items[0].store,
+    machine: items[0].machine,
+    unit: items[0].unit,
+    latestDiff: Number(sorted[0]?.diff || 0),
+    recent3Diff: sorted.slice(0, 3).reduce((sum, record) => sum + Number(record.diff || 0), 0)
+  };
+}
+
+function compareUnitStats(a, b) {
+  return numberValue(a.unit) - numberValue(b.unit) || a.store.localeCompare(b.store, "ja") || a.machine.localeCompare(b.machine, "ja");
+}
+
+function buildUnitSignals(items) {
+  const sorted = items.slice().sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0];
+  const recent3Diff = sorted.slice(0, 3).reduce((sum, record) => sum + Number(record.diff || 0), 0);
+  const signals = [];
+  if (latest?.diff <= -1000 || recent3Diff <= -1500) signals.push("直近凹み：上げ候補として要確認");
+  if (latest?.rating === "A" && latest.diff < 0) signals.push("据え置き候補：数値強めで差枚マイナス");
+  if (sorted.slice(0, 2).every((record) => record?.rating === "A")) signals.push("据え置き候補：A評価が連続");
+  if (sorted.some((record) => record.rbRate && record.rbRate <= 300)) signals.push("RB良好履歴あり");
+  return signals.length ? signals : ["大きな凹み・据え置きサインは弱め"];
+}
+
+function buildUnitRanges(records) {
+  const mode = $("#analysisRangeMode").value;
+  const customRanges = parseCustomRanges($("#analysisCustomRanges").value);
+  if (mode === "custom" && customRanges.length) {
+    return customRanges.map((range) => ({
+      label: `${range.from}〜${range.to}`,
+      items: records.filter((record) => numberValue(record.unit) >= range.from && numberValue(record.unit) <= range.to)
+    })).filter((range) => range.items.length);
+  }
+  const groups = groupBy(records.filter((record) => numberValue(record.unit) > 0), (record) => {
+    const unit = numberValue(record.unit);
+    const start = Math.floor(unit / 10) * 10;
+    return `${start}〜${start + 9}`;
+  });
+  return Object.entries(groups).sort(([a], [b]) => numberValue(a) - numberValue(b)).map(([label, items]) => ({ label, items }));
+}
+
+function parseCustomRanges(value) {
+  return String(value || "").split(",").map((chunk) => {
+    const match = chunk.trim().match(/^(\d+)\s*[-〜~]\s*(\d+)$/);
+    if (!match) return null;
+    const from = Number(match[1]);
+    const to = Number(match[2]);
+    return { from: Math.min(from, to), to: Math.max(from, to) };
+  }).filter(Boolean);
+}
+
+function unitGroupKey(record) {
+  return `${record.store}__${record.machine}__${record.unit}`;
+}
+
+function recordDate(record) {
+  return new Date(`${record.date}T00:00:00`);
+}
+
+function percentage(part, total) {
+  return total ? Math.round((part / total) * 100) : 0;
+}
+
 function bindRecommendations() {
   $("#makeRecommendButton").addEventListener("click", renderRecommendations);
 }
@@ -2571,6 +2836,7 @@ function renderAll() {
   renderOptions();
   renderRecords();
   renderSummary();
+  renderAnalysis();
   renderMasters();
   $("#storageStatus").textContent = `保存 ${state.records.length}件`;
 }
