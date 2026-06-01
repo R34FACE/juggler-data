@@ -646,3 +646,43 @@ button:disabled {
   line-height: 1.5;
   margin-top: 4px;
 }
+
+.recommendation-item {
+  gap: 12px;
+}
+
+.recommend-meta {
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.recommend-block {
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.recommend-block strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.recommend-block p {
+  margin: 0;
+}
+
+.recommend-block ul {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.recommend-block.concern {
+  border-color: #f4c7c3;
+}
