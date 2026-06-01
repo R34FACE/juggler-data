@@ -2404,12 +2404,8 @@ function bindRecords() {
     state.sort.key = key;
     renderRecords();
   });
-  $("#exportRecordsButton").addEventListener("click", () => exportCsv("slot-records.csv", recordsToCsv(state.records)));
-  $("#importRecordsInput").addEventListener("change", (event) => {
-    importRecordsCsv(event.target.files[0]).finally(() => {
-      event.target.value = "";
-    });
-  });
+  $("#exportRecordsButton").addEventListener("click", () => exportCsv(`slot-records_${getTodayString()}.csv`, recordsToCsv(state.records)));
+  $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
   $("#deleteAllRecordsButton").addEventListener("click", () => {
     if (!confirm("保存データをすべて削除しますか？")) return;
     state.records = [];
@@ -3349,6 +3345,14 @@ function toCsv(rows) {
     const text = String(cell ?? "");
     return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }).join(",")).join("\n");
+}
+
+function getTodayString() {
+  const today = new Date();
+  const year = today.getFullYear();
+  const month = String(today.getMonth() + 1).padStart(2, "0");
+  const date = String(today.getDate()).padStart(2, "0");
+  return `${year}-${month}-${date}`;
 }
 
 function exportCsv(filename, csv) {
