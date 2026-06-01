@@ -565,9 +565,10 @@ function analyzeGraphDiff(source, graphRect) {
     .filter((component) => isLikelyYellowLineComponent(component, width, height));
 
   const zeroLineY = detectZeroLineY(imageData);
-  const endpointInfo = detectYellowEndpoint(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
+  const endpointInfo = detectYellowEndpoint(lineMask, lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
   const endpoint = endpointInfo?.endpoint || null;
   const adoptedLineComponent = endpointInfo?.component || null;
+  const adoptedLineSegment = endpointInfo?.segment || null;
   const endpointSide = getEndpointSide(endpoint, zeroLineY);
   const yellowCount = lineComponents.reduce((sum, component) => sum + component.pixelCount, 0);
   const warnings = [...(endpointInfo?.warnings || [])];
@@ -600,6 +601,7 @@ function analyzeGraphDiff(source, graphRect) {
     yellowComponents,
     lineComponents,
     adoptedLineComponent,
+    adoptedLineSegment,
     warnings,
     status: warnings.length ? `要確認: グラフ推定・${warnings.join("・")}` : "要確認: グラフ推定"
   };
@@ -754,7 +756,7 @@ function isLikelyYellowLineComponent(component, width, height) {
   if (component.height > Math.max(70, height * 0.55)) return false;
   if (component.density > 0.78 && component.height > Math.max(10, height * 0.045)) return false;
   if (component.left > width * 0.72) return false;
-  if (component.right < width * 0.45) return false;
+  if (component.right < width * 0.12) return false;
   const centerX = (component.left + component.right) / 2;
   const centerY = (component.top + component.bottom) / 2;
   const isolatedLowerRightChunk = centerX >= width * 0.55 && centerY >= height * 0.60 && component.left > width * 0.50 && component.xSpan < width * 0.35;
@@ -841,19 +843,169 @@ function detectZeroLineY(imageData) {
   return Math.round(best.sum / best.count);
 }
 
-function detectYellowEndpoint(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
+function detectYellowEndpoint(lineMask, lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
+  const warnings = [];
+  const trace = buildYellowLineTrace(lineMask, width, height);
+  const segments = findYellowLineTraceSegments(trace, width, height)
+    .filter((segment) => segment.right >= width * 0.12)
+    .filter((segment) => !segmentEndpointLooksLikeText(segment, yellowTextBlocks, width, height))
+    .sort((a, b) => b.right - a.right || b.validCount - a.validCount);
+
+  if (segments.length) {
+    const chosenSegment = segments[0];
+    if (segments.length > 1 || hasDiscardedMiddleComponents(lineComponents, chosenSegment)) warnings.push("途中成分除外");
+    if (chosenSegment.right < width * 0.45) warnings.push("短時間稼働推定");
+    warnings.push("最右連続区間採用");
+    const endpoint = endpointFromTraceSegment(chosenSegment, trace);
+    const component = lineComponents.find((candidate) => candidate.left <= chosenSegment.right && candidate.right >= chosenSegment.left)
+      || segmentToComponent(chosenSegment, trace);
+    return { endpoint, component, segment: chosenSegment, warnings };
+  }
+
+  const fallback = detectYellowEndpointFromComponents(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
+  if (fallback.endpoint && fallback.endpoint.x < width * 0.45) fallback.warnings.push("短時間稼働推定");
+  return fallback;
+}
+
+function buildYellowLineTrace(lineMask, width, height) {
+  const raw = Array(width).fill(null);
+  const counts = Array(width).fill(0);
+  const maxColumnPixels = Math.max(18, Math.round(height * 0.10));
+  for (let x = 0; x < width; x += 1) {
+    const ys = [];
+    for (let y = 0; y < height; y += 1) {
+      if (lineMask[y * width + x]) ys.push(y);
+    }
+    if (!ys.length || ys.length > maxColumnPixels) continue;
+    raw[x] = median(ys);
+    counts[x] = ys.length;
+  }
+  const filled = raw.slice();
+  const maxGap = 8;
+  const maxYJump = Math.max(20, Math.min(35, Math.round(height * 0.16)));
+  let prevX = -1;
+  for (let x = 0; x < width; x += 1) {
+    if (!Number.isFinite(raw[x])) continue;
+    if (prevX >= 0) {
+      const gap = x - prevX - 1;
+      if (gap > 0 && gap <= maxGap && Math.abs(raw[x] - raw[prevX]) <= maxYJump) {
+        for (let fillX = prevX + 1; fillX < x; fillX += 1) {
+          const ratio = (fillX - prevX) / (x - prevX);
+          filled[fillX] = raw[prevX] + (raw[x] - raw[prevX]) * ratio;
+        }
+      }
+    }
+    prevX = x;
+  }
+  return { raw, filled, counts, maxGap, maxYJump };
+}
+
+function findYellowLineTraceSegments(trace, width, height) {
+  const segments = [];
+  const minValidColumns = Math.max(4, Math.round(width * 0.012));
+  const minSpan = Math.max(5, Math.round(width * 0.015));
+  let current = null;
+  let lastValidX = null;
+  let lastY = null;
+
+  for (let x = 0; x < width; x += 1) {
+    const y = trace.filled[x];
+    if (!Number.isFinite(y)) continue;
+    const rawValid = Number.isFinite(trace.raw[x]);
+    const canConnect = current
+      && lastValidX !== null
+      && x - lastValidX <= trace.maxGap + 1
+      && Math.abs(y - lastY) <= trace.maxYJump;
+    if (!current || !canConnect) {
+      pushYellowTraceSegment(segments, current, minValidColumns, minSpan);
+      current = { left: x, right: x, top: y, bottom: y, validCount: rawValid ? 1 : 0, xs: [x], ys: [y] };
+    } else {
+      current.right = x;
+      current.top = Math.min(current.top, y);
+      current.bottom = Math.max(current.bottom, y);
+      current.xs.push(x);
+      current.ys.push(y);
+      if (rawValid) current.validCount += 1;
+    }
+    lastValidX = x;
+    lastY = y;
+  }
+  pushYellowTraceSegment(segments, current, minValidColumns, minSpan);
+  return segments.map((segment) => ({
+    ...segment,
+    top: Math.floor(segment.top),
+    bottom: Math.ceil(segment.bottom),
+    width: segment.right - segment.left + 1,
+    height: Math.ceil(segment.bottom) - Math.floor(segment.top) + 1
+  }));
+}
+
+function pushYellowTraceSegment(segments, segment, minValidColumns, minSpan) {
+  if (!segment) return;
+  const span = segment.right - segment.left + 1;
+  if (segment.validCount >= minValidColumns && span >= minSpan) segments.push(segment);
+}
+
+function segmentEndpointLooksLikeText(segment, yellowTextBlocks, width, height) {
+  const endpoint = endpointFromTraceSegment(segment, { filled: [] });
+  return endpointLooksLikeText(endpoint, yellowTextBlocks, width, height);
+}
+
+function endpointFromTraceSegment(segment, trace) {
+  const windowSize = Math.max(5, Math.min(15, Math.round(segment.width * 0.20)));
+  const left = Math.max(segment.left, segment.right - windowSize + 1);
+  const xs = [];
+  const ys = [];
+  for (let x = left; x <= segment.right; x += 1) {
+    const y = trace.filled[x];
+    if (!Number.isFinite(y)) continue;
+    xs.push(x);
+    ys.push(y);
+  }
+  return { x: Math.round(median(xs.length ? xs : [segment.right])), y: Math.round(median(ys.length ? ys : segment.ys)) };
+}
+
+function hasDiscardedMiddleComponents(lineComponents, chosenSegment) {
+  return lineComponents.some((component) => component.right < chosenSegment.left - 2 || component.left > chosenSegment.right + 2);
+}
+
+function segmentToComponent(segment, trace) {
+  const byX = new Map();
+  for (let x = segment.left; x <= segment.right; x += 1) {
+    const y = trace.filled[x];
+    if (Number.isFinite(y)) byX.set(x, [Math.round(y)]);
+  }
+  return {
+    left: segment.left,
+    right: segment.right,
+    top: segment.top,
+    bottom: segment.bottom,
+    width: segment.width,
+    height: segment.height,
+    pixelCount: segment.validCount,
+    count: segment.validCount,
+    xSpan: segment.width,
+    ySpan: segment.height,
+    density: segment.validCount / Math.max(1, segment.width * segment.height),
+    byX
+  };
+}
+
+function detectYellowEndpointFromComponents(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
   const warnings = [];
   const candidates = lineComponents
     .map((component) => ({ component, endpoint: endpointFromLineComponent(component, width) }))
     .filter((candidate) => candidate.endpoint)
     .filter((candidate) => !endpointLooksLikeText(candidate.endpoint, yellowTextBlocks, width, height))
-    .sort((a, b) => scoreLineEndpointCandidate(b, width) - scoreLineEndpointCandidate(a, width));
+    .sort((a, b) => b.endpoint.x - a.endpoint.x || scoreLineEndpointCandidate(b, width) - scoreLineEndpointCandidate(a, width));
 
-  if (!candidates.length) return { endpoint: null, component: null, warnings };
+  if (!candidates.length) return { endpoint: null, component: null, segment: null, warnings };
 
   let chosen = candidates[0];
+  if (candidates.length > 1) warnings.push("途中成分除外");
+  warnings.push("最右連続区間採用");
   const safeCandidate = candidates.find((candidate) => !isSuspiciousNumberEndpoint(candidate.endpoint, candidate.component, yellowComponents, width, height, yellowTextBlocks));
-  if (safeCandidate && safeCandidate !== chosen && isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, yellowComponents, width, height, yellowTextBlocks)) {
+  if (safeCandidate && safeCandidate.endpoint.x >= chosen.endpoint.x - Math.max(8, width * 0.03) && isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, yellowComponents, width, height, yellowTextBlocks)) {
     chosen = safeCandidate;
     warnings.push("数字誤認識再探索");
   }
@@ -863,28 +1015,21 @@ function detectYellowEndpoint(lineComponents, width, height, zeroLineY, yellowTe
     if (rescannedEndpoint) {
       chosen = { ...chosen, endpoint: rescannedEndpoint };
       warnings.push("右端から再探索");
-    } else {
-      const alternative = candidates.find((candidate) => candidate !== chosen && !isSuspiciousNumberEndpoint(candidate.endpoint, candidate.component, yellowComponents, width, height, yellowTextBlocks));
-      if (alternative) {
-        chosen = alternative;
-        warnings.push("右下数字近傍を除外");
-      } else warnings.push("終点数字近傍要確認");
-    }
+    } else warnings.push("終点数字近傍要確認");
   }
 
   if (zeroLineY !== null && chosen.endpoint.y > zeroLineY) {
     const rightEdgeBodyY = rightEdgeMedianY(chosen.component, Math.max(18, Math.round(width * 0.04)));
     const probablyTextDraggedEndpoint = rightEdgeBodyY !== null && rightEdgeBodyY < zeroLineY && chosen.endpoint.y > zeroLineY;
-    if (probablyTextDraggedEndpoint) {
-      const alternative = candidates.find((candidate) => candidate.endpoint.y <= zeroLineY || candidate.component !== chosen.component);
-      if (alternative) {
-        chosen = alternative;
-        warnings.push("数字誤認識再探索");
-      }
-    }
+    if (probablyTextDraggedEndpoint) warnings.push("数字誤認識要確認");
   }
 
-  return { endpoint: chosen.endpoint, component: chosen.component, warnings };
+  return { endpoint: chosen.endpoint, component: chosen.component, segment: componentToSegment(chosen.component), warnings };
+}
+
+function componentToSegment(component) {
+  if (!component) return null;
+  return { left: component.left, right: component.right, top: component.top, bottom: component.bottom, width: component.width, height: component.height, validCount: component.pixelCount };
 }
 
 
@@ -937,7 +1082,7 @@ function hasLineContinuityNearEndpoint(component, endpoint, width) {
   for (let i = 1; i < localXs.length; i += 1) largestGap = Math.max(largestGap, localXs[i] - localXs[i - 1]);
   const medians = localXs.map((x) => median(component.byX.get(x))).filter((value) => Number.isFinite(value));
   const ySpread = medians.length ? Math.max(...medians) - Math.min(...medians) : Number.POSITIVE_INFINITY;
-  return largestGap <= 4 && ySpread <= Math.max(35, width * 0.08);
+  return largestGap <= 8 && ySpread <= Math.max(35, width * 0.08);
 }
 
 function findContinuousEndpointFromRight(component, width, height, yellowComponents, yellowTextBlocks) {
@@ -945,7 +1090,7 @@ function findContinuousEndpointFromRight(component, width, height, yellowCompone
   for (const x of xs) {
     const endpoint = endpointFromLineComponentUpToX(component, width, x);
     if (!endpoint) continue;
-    if (endpoint.x < width * 0.45) return null;
+    if (endpoint.x < width * 0.12) return null;
     if (!isSuspiciousNumberEndpoint(endpoint, component, yellowComponents, width, height, yellowTextBlocks)) return endpoint;
   }
   return null;
@@ -955,7 +1100,7 @@ function endpointFromLineComponentUpToX(component, width, maxX) {
   const xs = [...component.byX.keys()].filter((x) => x <= maxX).sort((a, b) => a - b);
   if (!xs.length) return null;
   const rightmost = xs.at(-1);
-  if (rightmost < width * 0.45) return null;
+  if (rightmost < width * 0.12) return null;
   const windowSize = Math.max(5, Math.min(15, Math.round(component.xSpan * 0.12)));
   const windowXs = xs.filter((x) => x >= rightmost - windowSize).slice(-20);
   const ys = windowXs.flatMap((x) => component.byX.get(x) || []).filter((value) => Number.isFinite(value));
@@ -967,7 +1112,7 @@ function endpointFromLineComponent(component, width) {
   const xs = [...component.byX.keys()].sort((a, b) => a - b);
   if (!xs.length) return null;
   const rightmost = xs.at(-1);
-  if (rightmost < width * 0.45) return null;
+  if (rightmost < width * 0.12) return null;
   const windowSize = Math.max(5, Math.min(15, Math.round(component.xSpan * 0.12)));
   const windowXs = xs.filter((x) => x >= rightmost - windowSize).slice(-20);
   const ys = windowXs
@@ -1091,7 +1236,7 @@ function graphResultDebugText(result) {
   const endpointY = result.endpoint ? Math.round(result.endpoint.y) : "要確認";
   const side = result.endpointSide || getEndpointSide(result.endpoint, result.zeroLineY);
   const diff = result.diff === null ? "要確認" : `${formatSignedNumber(result.diff)}枚`;
-  const lineStatus = result.adoptedLineComponent ? "ライン成分採用" : "ライン成分要確認";
+  const lineStatus = result.adoptedLineSegment ? "最右連続区間採用" : "ライン成分要確認";
   const textStatus = result.yellowTextBlocks?.length ? `数字除外済み ${result.yellowTextBlocks.length}件` : "数字候補なし";
   return `0ラインY: ${zero} / 終点Y: ${endpointY} / ${side} / 推定差枚: ${diff} / ${lineStatus} / ${textStatus}`;
 }
@@ -1101,7 +1246,10 @@ function drawGraphDebugOverlay(canvas, result) {
   ctx.save();
   ctx.lineWidth = 2;
   (result.yellowTextBlocks || []).forEach((block) => drawDebugRect(ctx, block, "#ff9f1a", "数字除外"));
-  if (result.adoptedLineComponent) drawDebugRect(ctx, result.adoptedLineComponent, "#39ff14", "ライン成分採用");
+  if (result.adoptedLineSegment) drawDebugRect(ctx, result.adoptedLineSegment, "#39ff14", "最終連続区間");
+  else if (result.adoptedLineComponent) drawDebugRect(ctx, result.adoptedLineComponent, "#39ff14", "最右連続区間");
+  if (result.warnings?.includes("途中成分除外")) drawDebugBadge(ctx, "途中成分除外", 14, 58, "#ffb020");
+  if (result.warnings?.includes("短時間稼働推定")) drawDebugBadge(ctx, "短時間稼働推定", 14, 88, "#7cffc4");
   if (result.zeroLineY !== null) {
     ctx.strokeStyle = "#00d5ff";
     ctx.beginPath();
@@ -1138,6 +1286,16 @@ function drawDebugRect(ctx, rect, color, label) {
   ctx.restore();
 }
 
+function drawDebugBadge(ctx, label, x, y, color) {
+  ctx.save();
+  ctx.font = "13px sans-serif";
+  const labelWidth = Math.max(96, label.length * 13);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.68)";
+  ctx.fillRect(x - 2, y - 16, labelWidth, 22);
+  ctx.fillStyle = color;
+  ctx.fillText(label, x + 4, y);
+  ctx.restore();
+}
 
 async function recognizeBasicDataTableImage(file, imageNumber, settings) {
   updateUploadStatus(`指定範囲を補正中です（${imageNumber}）...`);
