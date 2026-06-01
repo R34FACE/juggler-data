@@ -647,6 +647,7 @@ button:disabled {
   margin-top: 4px;
 }
 
+<<<<<<< codex-iru1hr
 .recommend-summary {
   background: #fff8ed;
   border: 1px solid #fed7aa;
@@ -661,4 +662,34 @@ button:disabled {
 .recommend-table td:last-child {
   line-height: 1.6;
   min-width: 280px;
+=======
+.memo-tag-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.memo-tag-entry {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.memo-tag-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.memo-tag-panel select[multiple] {
+  min-height: 132px;
+}
+
+.memo-tag-entry button {
+  min-width: 96px;
+>>>>>>> main
 }
