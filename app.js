@@ -45,6 +45,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindAnalysis();
   bindRecommendations();
   bindMasters();
+  refreshRecordEvaluations();
   addDraftRow();
   renderAll();
 });
@@ -3253,13 +3254,14 @@ function evaluateRecord(record) {
     };
   }
 
-  const master = state.masters.find((item) => item.name === record.machine);
+  const master = findMachineMaster(record.machine);
+  const hasUsableMaster = isCompleteMachineMaster(master);
   const confidence = record.games >= 6000 ? "高" : record.games >= 3000 ? "中" : "低";
   let score = record.games >= 6000 ? 18 : record.games >= 3000 ? 10 : 2;
   let nearestSettings = "-";
   let reason = "";
 
-  if (master) {
+  if (hasUsableMaster) {
     const comparisons = [1, 2, 3, 4, 5, 6].map((setting) => {
       const data = master.settings?.[setting] || {};
       const regDiff = diffScore(record.rbRate, data.reg);
@@ -3279,13 +3281,17 @@ function evaluateRecord(record) {
     if (record.rbRate && record.rbRate <= 300) score += 22;
     if (record.totalRate && record.totalRate <= 145) score += 14;
     if (record.bbRate && record.bbRate <= 260) score += 4;
-    reason = "機種マスター未登録のため、一般的なREG・合算の強さで仮評価しています。";
+    reason = master
+      ? "機種マスターが不完全なため、一般的なREG・合算基準で仮評価しています。"
+      : "機種マスター未登録のため、一般的なREG・合算の強さで仮評価しています。";
   }
 
   if (record.diff > 1000) score += 4;
   if (record.diff < -1000 && record.rbRate && record.rbRate <= 320) score += 6;
   if (record.games < 3000) score -= 18;
   if (record.rbRate && record.rbRate > 420 && record.games >= 3000) score -= 20;
+
+  score = applyStrongPerformanceFloor(record, score);
 
   return {
     rating: score >= 72 ? "A" : score >= 44 ? "B" : "C",
@@ -3294,6 +3300,42 @@ function evaluateRecord(record) {
     reason,
     nearestSettings
   };
+}
+
+function findMachineMaster(machineName) {
+  const normalizedName = normalizeMachineName(machineName);
+  if (!normalizedName) return null;
+  return state.masters.find((master) => normalizeMachineName(master.name) === normalizedName) || null;
+}
+
+function normalizeMachineName(name) {
+  const normalized = String(name || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/iii/g, "3")
+    .replace(/[\s　・･_ー-]/g, "");
+
+  if (/^ハッピ(ジャグラ)?v?3$/.test(normalized)) return "happy-juggler-v3";
+  return normalized;
+}
+
+function isCompleteMachineMaster(master) {
+  if (!master) return false;
+  return [1, 2, 3, 4, 5, 6].every((setting) => {
+    const data = master.settings?.[setting] || {};
+    return hasPositiveNumber(data.big) && hasPositiveNumber(data.reg) && hasPositiveNumber(data.total);
+  });
+}
+
+function hasPositiveNumber(value) {
+  return Number(value) > 0;
+}
+
+function applyStrongPerformanceFloor(record, score) {
+  if (record.games < 6000 || !record.rbRate || !record.totalRate || record.diff <= 0) return score;
+  if (record.rbRate <= 270 && record.totalRate <= 120 && record.diff > 1000) return Math.max(score, 72);
+  if (record.rbRate <= 300 && record.totalRate <= 130) return Math.max(score, 44);
+  return score;
 }
 
 function diffScore(actual, target) {
@@ -3317,6 +3359,29 @@ function recommendationScore(record) {
     + (record.games >= 5000 ? 15 : 0)
     + (record.rbRate && record.rbRate <= 300 ? 18 : 0)
     + (record.diff > 0 ? 5 : 0);
+}
+
+function refreshRecordEvaluations() {
+  let changed = false;
+  state.records = state.records.map((record) => {
+    const rates = calculateRates(record.games, record.bb, record.rb);
+    const evaluation = evaluateRecord({ ...record, bbRate: rates.bb, rbRate: rates.rb, totalRate: rates.total });
+    const updated = {
+      ...record,
+      bbRate: rates.bb,
+      rbRate: rates.rb,
+      totalRate: rates.total,
+      rating: evaluation.rating || record.rating || "要確認",
+      expectation: evaluation.expectation ?? record.expectation ?? 0,
+      confidence: evaluation.confidence || record.confidence || "低",
+      reason: evaluation.reason || record.reason || "",
+      nearestSettings: evaluation.nearestSettings || record.nearestSettings || "-"
+    };
+    changed = changed || ["bbRate", "rbRate", "totalRate", "rating", "expectation", "confidence", "reason", "nearestSettings"]
+      .some((key) => updated[key] !== record[key]);
+    return updated;
+  });
+  if (changed) saveJson(STORAGE_KEYS.records, state.records);
 }
 
 function renderAll() {
