@@ -2404,8 +2404,8 @@ function bindRecords() {
     state.sort.key = key;
     renderRecords();
   });
-  $("#exportRecordsButton").addEventListener("click", () => exportRecordsCsv("slot-records_latest.csv"));
-  $("#exportRecordsDatedButton").addEventListener("click", () => exportRecordsCsv(`slot-records_${todayString()}.csv`));
+  $("#exportLatestRecordsButton").addEventListener("click", () => exportRecordsCsv("slot-records_latest.csv"));
+  $("#exportDatedRecordsButton").addEventListener("click", () => exportRecordsCsv(`slot-records_${formatLocalDate(new Date())}.csv`));
   $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
   $("#deleteAllRecordsButton").addEventListener("click", () => {
     if (!confirm("保存データをすべて削除しますか？")) return;
@@ -3321,6 +3321,27 @@ function recordsToCsv(records) {
     record.confidence, record.reason, record.nearestSettings, record.memo, record.createdAt
   ]);
   return toCsv([headers, ...rows]);
+}
+
+function exportRecordsCsv(filename) {
+  const latestDate = getLatestRecordDate(state.records);
+  const message = `保存済みデータ ${state.records.length}件をCSV出力します。最新日：${latestDate || "未登録"}`;
+  if (!confirm(message)) return;
+  exportCsv(filename, recordsToCsv(state.records));
+}
+
+function getLatestRecordDate(records) {
+  return records
+    .map((record) => record.date)
+    .filter(Boolean)
+    .sort((a, b) => b.localeCompare(a))[0] || "";
+}
+
+function formatLocalDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function mastersToCsv(masters) {
