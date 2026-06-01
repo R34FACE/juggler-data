@@ -2407,6 +2407,7 @@ function bindRecords() {
   });
   $("#exportLatestRecordsButton").addEventListener("click", () => exportRecordsCsv("slot-records_latest.csv"));
   $("#exportDatedRecordsButton").addEventListener("click", () => exportRecordsCsv(`slot-records_${formatLocalDate(new Date())}.csv`));
+  $("#reevaluateRecordsButton").addEventListener("click", reevaluateSavedRecords);
   $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
   $("#deleteAllRecordsButton").addEventListener("click", () => {
     if (!confirm("保存データをすべて削除しますか？")) return;
@@ -3361,27 +3362,87 @@ function recommendationScore(record) {
     + (record.diff > 0 ? 5 : 0);
 }
 
+const REEVALUATION_KEYS = ["bbRate", "rbRate", "totalRate", "rating", "expectation", "confidence", "reason", "nearestSettings"];
+const RATING_LABELS = ["A", "B", "C", "要確認"];
+
+function buildReevaluatedRecord(record) {
+  const rates = calculateRates(record.games, record.bb, record.rb);
+  const evaluation = evaluateRecord({ ...record, bbRate: rates.bb, rbRate: rates.rb, totalRate: rates.total });
+  return {
+    ...record,
+    bbRate: rates.bb,
+    rbRate: rates.rb,
+    totalRate: rates.total,
+    rating: evaluation.rating || "要確認",
+    expectation: evaluation.expectation ?? 0,
+    confidence: evaluation.confidence || "低",
+    reason: evaluation.reason || "",
+    nearestSettings: evaluation.nearestSettings || "-"
+  };
+}
+
+function hasReevaluationChange(before, after) {
+  return REEVALUATION_KEYS.some((key) => before[key] !== after[key]);
+}
+
+function normalizeRatingLabel(rating) {
+  return RATING_LABELS.includes(rating) ? rating : "要確認";
+}
+
 function refreshRecordEvaluations() {
   let changed = false;
   state.records = state.records.map((record) => {
-    const rates = calculateRates(record.games, record.bb, record.rb);
-    const evaluation = evaluateRecord({ ...record, bbRate: rates.bb, rbRate: rates.rb, totalRate: rates.total });
-    const updated = {
-      ...record,
-      bbRate: rates.bb,
-      rbRate: rates.rb,
-      totalRate: rates.total,
-      rating: evaluation.rating || record.rating || "要確認",
-      expectation: evaluation.expectation ?? record.expectation ?? 0,
-      confidence: evaluation.confidence || record.confidence || "低",
-      reason: evaluation.reason || record.reason || "",
-      nearestSettings: evaluation.nearestSettings || record.nearestSettings || "-"
-    };
-    changed = changed || ["bbRate", "rbRate", "totalRate", "rating", "expectation", "confidence", "reason", "nearestSettings"]
-      .some((key) => updated[key] !== record[key]);
+    const updated = buildReevaluatedRecord(record);
+    changed = changed || hasReevaluationChange(record, updated);
     return updated;
   });
   if (changed) saveJson(STORAGE_KEYS.records, state.records);
+}
+
+function reevaluateSavedRecords() {
+  const total = state.records.length;
+  if (!total) {
+    alert("再判定する保存済みデータがありません。");
+    return;
+  }
+
+  const confirmed = confirm([
+    `保存済みデータ${total}件を最新ロジックで再判定します。よろしいですか？`,
+    "再判定前にCSVバックアップをおすすめします。",
+    "台番号、日付、店舗、機種、G数、BB、RB、差枚、メモは変更しません。"
+  ].join("\n"));
+  if (!confirmed) return;
+
+  const ratingCounts = Object.fromEntries(RATING_LABELS.map((label) => [label, 0]));
+  const transitions = {};
+  let changedCount = 0;
+
+  state.records = state.records.map((record) => {
+    const updated = buildReevaluatedRecord(record);
+    const nextRating = normalizeRatingLabel(updated.rating);
+    ratingCounts[nextRating] += 1;
+
+    if (hasReevaluationChange(record, updated)) changedCount += 1;
+
+    const previousRating = normalizeRatingLabel(record.rating);
+    if (previousRating !== nextRating) {
+      const key = `${previousRating}→${nextRating}`;
+      transitions[key] = (transitions[key] || 0) + 1;
+    }
+
+    return updated;
+  });
+
+  saveJson(STORAGE_KEYS.records, state.records);
+  renderAll();
+
+  const ratingSummary = RATING_LABELS.map((label) => `${label} ${ratingCounts[label]}件`).join("、");
+  const transitionEntries = Object.entries(transitions);
+  const transitionSummary = transitionEntries.length
+    ? `判定変更：${transitionEntries.map(([label, count]) => `${label}：${count}件`).join("、")}`
+    : "判定変更：なし";
+
+  alert(`再判定完了：${ratingSummary}\n判定項目更新：${changedCount}件\n${transitionSummary}`);
 }
 
 function renderAll() {
