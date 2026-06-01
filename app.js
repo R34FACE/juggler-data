@@ -1,14 +1,31 @@
 const STORAGE_KEYS = {
   records: "slotRecords.v1",
   masters: "slotMachineMasters.v1",
-  stores: "slotStores.v1"
+  stores: "slotStores.v1",
+  memoTags: "slotMemoTags.v1"
 };
+
+const INITIAL_MEMO_TAGS = [
+  "ゾロ目",
+  "ジャグラー景品",
+  "旧イベ",
+  "新台入替",
+  "週末",
+  "月末",
+  "LINE示唆",
+  "全体強め",
+  "ジャグラー寄せ",
+  "据え置きっぽい",
+  "上げ狙い"
+];
 
 const state = {
   records: loadJson(STORAGE_KEYS.records, []),
   masters: loadJson(STORAGE_KEYS.masters, []),
   stores: loadJson(STORAGE_KEYS.stores, []),
+  memoTags: loadMemoTags(),
   sort: { key: "date", direction: "desc" },
+  analysisSelection: null,
   ocrPreview: { files: [], settings: [], currentIndex: 0, image: null }
 };
 
@@ -21,9 +38,11 @@ document.addEventListener("DOMContentLoaded", () => {
   bindTabs();
   bindDraftTable();
   bindStores();
+  bindMemoTags();
   bindImageUploads();
   bindRecords();
   bindSummary();
+  bindAnalysis();
   bindRecommendations();
   bindMasters();
   addDraftRow();
@@ -42,6 +61,15 @@ function saveJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
+function loadMemoTags() {
+  const savedRaw = localStorage.getItem(STORAGE_KEYS.memoTags);
+  if (savedRaw === null) {
+    saveJson(STORAGE_KEYS.memoTags, INITIAL_MEMO_TAGS);
+    return INITIAL_MEMO_TAGS.slice();
+  }
+  return normalizeMemoTags(loadJson(STORAGE_KEYS.memoTags, INITIAL_MEMO_TAGS));
+}
+
 function uid(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -50,6 +78,7 @@ function initializeDates() {
   const today = new Date().toISOString().slice(0, 10);
   $("#inputDate").value = today;
   $("#recommendDate").value = today;
+  if ($("#analysisTo")) $("#analysisTo").value = today;
 }
 
 function bindTabs() {
@@ -111,6 +140,80 @@ function saveStoreName(store) {
   state.stores = unique([...state.stores, trimmed]);
   saveJson(STORAGE_KEYS.stores, state.stores);
   renderOptions();
+}
+
+function bindMemoTags() {
+  $("#saveMemoTagButton").addEventListener("click", () => {
+    const tag = $("#memoTagInput").value.trim();
+    if (!tag) {
+      alert("保存するメモタグを入力してください。");
+      return;
+    }
+    saveMemoTag(tag);
+    $("#memoTagInput").value = "";
+    $("#memoTagSelect").value = tag;
+  });
+
+  $("#addMemoTagButton").addEventListener("click", () => {
+    const tags = getSelectedMemoTags("#memoTagSelect");
+    if (!tags.length) {
+      alert("メモに追加するタグを選択してください。");
+      return;
+    }
+    addTagsToSessionMemo(tags);
+  });
+
+  $("#deleteMemoTagButton").addEventListener("click", () => {
+    const tags = getSelectedMemoTags("#memoTagSelect");
+    if (!tags.length) {
+      alert("削除するメモタグを選択してください。");
+      return;
+    }
+    if (!confirm(`メモタグ「${tags.join("、")}」を削除しますか？保存済みデータは削除されません。`)) return;
+    state.memoTags = state.memoTags.filter((tag) => !tags.includes(tag));
+    saveJson(STORAGE_KEYS.memoTags, state.memoTags);
+    renderOptions();
+  });
+}
+
+function saveMemoTag(tag) {
+  const trimmed = String(tag || "").trim();
+  if (!trimmed) return;
+  state.memoTags = normalizeMemoTags([...state.memoTags, trimmed]);
+  saveJson(STORAGE_KEYS.memoTags, state.memoTags);
+  renderOptions();
+}
+
+function normalizeMemoTags(tags) {
+  return unique((Array.isArray(tags) ? tags : []).map((tag) => String(tag || "").trim()));
+}
+
+function getSelectedMemoTags(selector) {
+  const select = $(selector);
+  if (!select) return [];
+  return [...select.selectedOptions].map((option) => option.value).filter(Boolean);
+}
+
+function addTagsToSessionMemo(tags) {
+  const memoInput = $("#sessionMemo");
+  const currentParts = splitMemoParts(memoInput.value);
+  const additions = tags.filter((tag) => !currentParts.includes(tag));
+  memoInput.value = [...currentParts, ...additions].join(" / ");
+}
+
+function splitMemoParts(memo) {
+  return String(memo || "")
+    .split(/\s*\/\s*/g)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function recordHasMemoTag(record, tag) {
+  return !tag || String(record.memo || "").includes(tag);
+}
+
+function recordHasAllMemoTags(record, tags) {
+  return tags.every((tag) => recordHasMemoTag(record, tag));
 }
 
 function bindImageUploads() {
@@ -565,9 +668,10 @@ function analyzeGraphDiff(source, graphRect) {
     .filter((component) => isLikelyYellowLineComponent(component, width, height));
 
   const zeroLineY = detectZeroLineY(imageData);
-  const endpointInfo = detectYellowEndpoint(lineComponents, lineMask, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
+  const endpointInfo = detectYellowEndpoint(lineMask, lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
   const endpoint = endpointInfo?.endpoint || null;
   const adoptedLineComponent = endpointInfo?.component || null;
+  const adoptedLineSegment = endpointInfo?.segment || null;
   const endpointSide = getEndpointSide(endpoint, zeroLineY);
   const yellowCount = lineComponents.reduce((sum, component) => sum + component.pixelCount, 0);
   const warnings = [...(endpointInfo?.warnings || [])];
@@ -600,6 +704,7 @@ function analyzeGraphDiff(source, graphRect) {
     yellowComponents,
     lineComponents,
     adoptedLineComponent,
+    adoptedLineSegment,
     warnings,
     status: warnings.length ? `要確認: グラフ推定・${warnings.join("・")}` : "要確認: グラフ推定"
   };
@@ -757,7 +862,7 @@ function isLikelyYellowLineComponent(component, width, height) {
   if (component.height > Math.max(70, height * 0.55)) return false;
   if (component.density > 0.78 && component.height > Math.max(10, height * 0.045)) return false;
   if (component.left > width * 0.72) return false;
-  if (component.right < width * 0.45) return false;
+  if (component.right < width * 0.12) return false;
   const centerX = (component.left + component.right) / 2;
   const centerY = (component.top + component.bottom) / 2;
   const isolatedLowerRightChunk = centerX >= width * 0.55 && centerY >= height * 0.60 && component.left > width * 0.50 && component.xSpan < width * 0.35;
@@ -922,7 +1027,155 @@ function detectZeroLineY(imageData) {
   return Math.round(best.sum / best.count);
 }
 
-function detectYellowEndpoint(lineComponents, lineMask, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
+function detectYellowEndpoint(lineMask, lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
+  const warnings = [];
+  const trace = buildYellowLineTrace(lineMask, width, height);
+  const segments = findYellowLineTraceSegments(trace, width, height)
+    .filter((segment) => segment.right >= width * 0.12)
+    .filter((segment) => !segmentEndpointLooksLikeText(segment, yellowTextBlocks, width, height))
+    .sort((a, b) => b.right - a.right || b.validCount - a.validCount);
+
+  if (segments.length) {
+    const chosenSegment = segments[0];
+    if (segments.length > 1 || hasDiscardedMiddleComponents(lineComponents, chosenSegment)) warnings.push("途中成分除外");
+    if (chosenSegment.right < width * 0.45) warnings.push("短時間稼働推定");
+    warnings.push("最右連続区間採用");
+    const endpoint = endpointFromTraceSegment(chosenSegment, trace);
+    const component = lineComponents.find((candidate) => candidate.left <= chosenSegment.right && candidate.right >= chosenSegment.left)
+      || segmentToComponent(chosenSegment, trace);
+    return { endpoint, component, segment: chosenSegment, warnings };
+  }
+
+  const fallback = detectYellowEndpointFromComponents(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
+  if (fallback.endpoint && fallback.endpoint.x < width * 0.45) fallback.warnings.push("短時間稼働推定");
+  return fallback;
+}
+
+function buildYellowLineTrace(lineMask, width, height) {
+  const raw = Array(width).fill(null);
+  const counts = Array(width).fill(0);
+  const maxColumnPixels = Math.max(18, Math.round(height * 0.10));
+  for (let x = 0; x < width; x += 1) {
+    const ys = [];
+    for (let y = 0; y < height; y += 1) {
+      if (lineMask[y * width + x]) ys.push(y);
+    }
+    if (!ys.length || ys.length > maxColumnPixels) continue;
+    raw[x] = median(ys);
+    counts[x] = ys.length;
+  }
+  const filled = raw.slice();
+  const maxGap = 8;
+  const maxYJump = Math.max(20, Math.min(35, Math.round(height * 0.16)));
+  let prevX = -1;
+  for (let x = 0; x < width; x += 1) {
+    if (!Number.isFinite(raw[x])) continue;
+    if (prevX >= 0) {
+      const gap = x - prevX - 1;
+      if (gap > 0 && gap <= maxGap && Math.abs(raw[x] - raw[prevX]) <= maxYJump) {
+        for (let fillX = prevX + 1; fillX < x; fillX += 1) {
+          const ratio = (fillX - prevX) / (x - prevX);
+          filled[fillX] = raw[prevX] + (raw[x] - raw[prevX]) * ratio;
+        }
+      }
+    }
+    prevX = x;
+  }
+  return { raw, filled, counts, maxGap, maxYJump };
+}
+
+function findYellowLineTraceSegments(trace, width, height) {
+  const segments = [];
+  const minValidColumns = Math.max(4, Math.round(width * 0.012));
+  const minSpan = Math.max(5, Math.round(width * 0.015));
+  let current = null;
+  let lastValidX = null;
+  let lastY = null;
+
+  for (let x = 0; x < width; x += 1) {
+    const y = trace.filled[x];
+    if (!Number.isFinite(y)) continue;
+    const rawValid = Number.isFinite(trace.raw[x]);
+    const canConnect = current
+      && lastValidX !== null
+      && x - lastValidX <= trace.maxGap + 1
+      && Math.abs(y - lastY) <= trace.maxYJump;
+    if (!current || !canConnect) {
+      pushYellowTraceSegment(segments, current, minValidColumns, minSpan);
+      current = { left: x, right: x, top: y, bottom: y, validCount: rawValid ? 1 : 0, xs: [x], ys: [y] };
+    } else {
+      current.right = x;
+      current.top = Math.min(current.top, y);
+      current.bottom = Math.max(current.bottom, y);
+      current.xs.push(x);
+      current.ys.push(y);
+      if (rawValid) current.validCount += 1;
+    }
+    lastValidX = x;
+    lastY = y;
+  }
+  pushYellowTraceSegment(segments, current, minValidColumns, minSpan);
+  return segments.map((segment) => ({
+    ...segment,
+    top: Math.floor(segment.top),
+    bottom: Math.ceil(segment.bottom),
+    width: segment.right - segment.left + 1,
+    height: Math.ceil(segment.bottom) - Math.floor(segment.top) + 1
+  }));
+}
+
+function pushYellowTraceSegment(segments, segment, minValidColumns, minSpan) {
+  if (!segment) return;
+  const span = segment.right - segment.left + 1;
+  if (segment.validCount >= minValidColumns && span >= minSpan) segments.push(segment);
+}
+
+function segmentEndpointLooksLikeText(segment, yellowTextBlocks, width, height) {
+  const endpoint = endpointFromTraceSegment(segment, { filled: [] });
+  return endpointLooksLikeText(endpoint, yellowTextBlocks, width, height);
+}
+
+function endpointFromTraceSegment(segment, trace) {
+  const windowSize = Math.max(5, Math.min(15, Math.round(segment.width * 0.20)));
+  const left = Math.max(segment.left, segment.right - windowSize + 1);
+  const xs = [];
+  const ys = [];
+  for (let x = left; x <= segment.right; x += 1) {
+    const y = trace.filled[x];
+    if (!Number.isFinite(y)) continue;
+    xs.push(x);
+    ys.push(y);
+  }
+  return { x: Math.round(median(xs.length ? xs : [segment.right])), y: Math.round(median(ys.length ? ys : segment.ys)) };
+}
+
+function hasDiscardedMiddleComponents(lineComponents, chosenSegment) {
+  return lineComponents.some((component) => component.right < chosenSegment.left - 2 || component.left > chosenSegment.right + 2);
+}
+
+function segmentToComponent(segment, trace) {
+  const byX = new Map();
+  for (let x = segment.left; x <= segment.right; x += 1) {
+    const y = trace.filled[x];
+    if (Number.isFinite(y)) byX.set(x, [Math.round(y)]);
+  }
+  return {
+    left: segment.left,
+    right: segment.right,
+    top: segment.top,
+    bottom: segment.bottom,
+    width: segment.width,
+    height: segment.height,
+    pixelCount: segment.validCount,
+    count: segment.validCount,
+    xSpan: segment.width,
+    ySpan: segment.height,
+    density: segment.validCount / Math.max(1, segment.width * segment.height),
+    byX
+  };
+}
+
+function detectYellowEndpointFromComponents(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
   const warnings = [];
   const profile = buildYellowLineProfile(lineMask, width, height);
   const rightmostRun = findRightmostContinuousLineRun(profile);
@@ -938,13 +1191,15 @@ function detectYellowEndpoint(lineComponents, lineMask, width, height, zeroLineY
     .map((component) => ({ component, endpoint: endpointFromLineComponent(component, width) }))
     .filter((candidate) => candidate.endpoint)
     .filter((candidate) => !endpointLooksLikeText(candidate.endpoint, yellowTextBlocks, width, height))
-    .sort((a, b) => scoreLineEndpointCandidate(b, width) - scoreLineEndpointCandidate(a, width));
+    .sort((a, b) => b.endpoint.x - a.endpoint.x || scoreLineEndpointCandidate(b, width) - scoreLineEndpointCandidate(a, width));
 
-  if (!candidates.length) return { endpoint: null, component: null, warnings };
+  if (!candidates.length) return { endpoint: null, component: null, segment: null, warnings };
 
   let chosen = candidates[0];
+  if (candidates.length > 1) warnings.push("途中成分除外");
+  warnings.push("最右連続区間採用");
   const safeCandidate = candidates.find((candidate) => !isSuspiciousNumberEndpoint(candidate.endpoint, candidate.component, yellowComponents, width, height, yellowTextBlocks));
-  if (safeCandidate && safeCandidate !== chosen && isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, yellowComponents, width, height, yellowTextBlocks)) {
+  if (safeCandidate && safeCandidate.endpoint.x >= chosen.endpoint.x - Math.max(8, width * 0.03) && isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, yellowComponents, width, height, yellowTextBlocks)) {
     chosen = safeCandidate;
     warnings.push("数字誤認識再探索");
   }
@@ -954,28 +1209,21 @@ function detectYellowEndpoint(lineComponents, lineMask, width, height, zeroLineY
     if (rescannedEndpoint) {
       chosen = { ...chosen, endpoint: rescannedEndpoint };
       warnings.push("右端から再探索");
-    } else {
-      const alternative = candidates.find((candidate) => candidate !== chosen && !isSuspiciousNumberEndpoint(candidate.endpoint, candidate.component, yellowComponents, width, height, yellowTextBlocks));
-      if (alternative) {
-        chosen = alternative;
-        warnings.push("右下数字近傍を除外");
-      } else warnings.push("終点数字近傍要確認");
-    }
+    } else warnings.push("終点数字近傍要確認");
   }
 
   if (zeroLineY !== null && chosen.endpoint.y > zeroLineY) {
     const rightEdgeBodyY = rightEdgeMedianY(chosen.component, Math.max(18, Math.round(width * 0.04)));
     const probablyTextDraggedEndpoint = rightEdgeBodyY !== null && rightEdgeBodyY < zeroLineY && chosen.endpoint.y > zeroLineY;
-    if (probablyTextDraggedEndpoint) {
-      const alternative = candidates.find((candidate) => candidate.endpoint.y <= zeroLineY || candidate.component !== chosen.component);
-      if (alternative) {
-        chosen = alternative;
-        warnings.push("数字誤認識再探索");
-      }
-    }
+    if (probablyTextDraggedEndpoint) warnings.push("数字誤認識要確認");
   }
 
-  return { endpoint: chosen.endpoint, component: chosen.component, warnings };
+  return { endpoint: chosen.endpoint, component: chosen.component, segment: componentToSegment(chosen.component), warnings };
+}
+
+function componentToSegment(component) {
+  if (!component) return null;
+  return { left: component.left, right: component.right, top: component.top, bottom: component.bottom, width: component.width, height: component.height, validCount: component.pixelCount };
 }
 
 
@@ -1028,7 +1276,7 @@ function hasLineContinuityNearEndpoint(component, endpoint, width) {
   for (let i = 1; i < localXs.length; i += 1) largestGap = Math.max(largestGap, localXs[i] - localXs[i - 1]);
   const medians = localXs.map((x) => median(component.byX.get(x))).filter((value) => Number.isFinite(value));
   const ySpread = medians.length ? Math.max(...medians) - Math.min(...medians) : Number.POSITIVE_INFINITY;
-  return largestGap <= 4 && ySpread <= Math.max(35, width * 0.08);
+  return largestGap <= 8 && ySpread <= Math.max(35, width * 0.08);
 }
 
 function findContinuousEndpointFromRight(component, width, height, yellowComponents, yellowTextBlocks) {
@@ -1036,7 +1284,7 @@ function findContinuousEndpointFromRight(component, width, height, yellowCompone
   for (const x of xs) {
     const endpoint = endpointFromLineComponentUpToX(component, width, x);
     if (!endpoint) continue;
-    if (endpoint.x < width * 0.45) return null;
+    if (endpoint.x < width * 0.12) return null;
     if (!isSuspiciousNumberEndpoint(endpoint, component, yellowComponents, width, height, yellowTextBlocks)) return endpoint;
   }
   return null;
@@ -1046,7 +1294,7 @@ function endpointFromLineComponentUpToX(component, width, maxX) {
   const xs = [...component.byX.keys()].filter((x) => x <= maxX).sort((a, b) => a - b);
   if (!xs.length) return null;
   const rightmost = xs.at(-1);
-  if (rightmost < width * 0.45) return null;
+  if (rightmost < width * 0.12) return null;
   const windowSize = Math.max(5, Math.min(15, Math.round(component.xSpan * 0.12)));
   const windowXs = xs.filter((x) => x >= rightmost - windowSize).slice(-20);
   const ys = windowXs.flatMap((x) => component.byX.get(x) || []).filter((value) => Number.isFinite(value));
@@ -1058,7 +1306,7 @@ function endpointFromLineComponent(component, width) {
   const xs = [...component.byX.keys()].sort((a, b) => a - b);
   if (!xs.length) return null;
   const rightmost = xs.at(-1);
-  if (rightmost < width * 0.45) return null;
+  if (rightmost < width * 0.12) return null;
   const windowSize = Math.max(5, Math.min(15, Math.round(component.xSpan * 0.12)));
   const windowXs = xs.filter((x) => x >= rightmost - windowSize).slice(-20);
   const ys = windowXs
@@ -1182,7 +1430,7 @@ function graphResultDebugText(result) {
   const endpointY = result.endpoint ? Math.round(result.endpoint.y) : "要確認";
   const side = result.endpointSide || getEndpointSide(result.endpoint, result.zeroLineY);
   const diff = result.diff === null ? "要確認" : `${formatSignedNumber(result.diff)}枚`;
-  const lineStatus = result.adoptedLineComponent ? "ライン成分採用" : "ライン成分要確認";
+  const lineStatus = result.adoptedLineSegment ? "最右連続区間採用" : "ライン成分要確認";
   const textStatus = result.yellowTextBlocks?.length ? `数字除外済み ${result.yellowTextBlocks.length}件` : "数字候補なし";
   return `0ラインY: ${zero} / 終点Y: ${endpointY} / ${side} / 推定差枚: ${diff} / ${lineStatus} / ${textStatus}`;
 }
@@ -1192,7 +1440,10 @@ function drawGraphDebugOverlay(canvas, result) {
   ctx.save();
   ctx.lineWidth = 2;
   (result.yellowTextBlocks || []).forEach((block) => drawDebugRect(ctx, block, "#ff9f1a", "数字除外"));
-  if (result.adoptedLineComponent) drawDebugRect(ctx, result.adoptedLineComponent, "#39ff14", "ライン成分採用");
+  if (result.adoptedLineSegment) drawDebugRect(ctx, result.adoptedLineSegment, "#39ff14", "最終連続区間");
+  else if (result.adoptedLineComponent) drawDebugRect(ctx, result.adoptedLineComponent, "#39ff14", "最右連続区間");
+  if (result.warnings?.includes("途中成分除外")) drawDebugBadge(ctx, "途中成分除外", 14, 58, "#ffb020");
+  if (result.warnings?.includes("短時間稼働推定")) drawDebugBadge(ctx, "短時間稼働推定", 14, 88, "#7cffc4");
   if (result.zeroLineY !== null) {
     ctx.strokeStyle = "#00d5ff";
     ctx.beginPath();
@@ -1229,6 +1480,16 @@ function drawDebugRect(ctx, rect, color, label) {
   ctx.restore();
 }
 
+function drawDebugBadge(ctx, label, x, y, color) {
+  ctx.save();
+  ctx.font = "13px sans-serif";
+  const labelWidth = Math.max(96, label.length * 13);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.68)";
+  ctx.fillRect(x - 2, y - 16, labelWidth, 22);
+  ctx.fillStyle = color;
+  ctx.fillText(label, x + 4, y);
+  ctx.restore();
+}
 
 async function recognizeBasicDataTableImage(file, imageNumber, settings) {
   updateUploadStatus(`指定範囲を補正中です（${imageNumber}）...`);
@@ -2133,7 +2394,7 @@ function numberValue(value) {
 }
 
 function bindRecords() {
-  ["filterDate", "filterStore", "filterMachine", "filterUnit", "filterRating", "filterPositive", "filterAOnly"].forEach((id) => {
+  ["filterDate", "filterStore", "filterMachine", "filterUnit", "filterRating", "filterMemoTag", "filterPositive", "filterAOnly"].forEach((id) => {
     $(`#${id}`).addEventListener("input", renderRecords);
   });
   $("#recordsTable thead").addEventListener("click", (event) => {
@@ -2159,6 +2420,7 @@ function getFilteredRecords() {
   const machine = $("#filterMachine").value.trim();
   const unit = $("#filterUnit").value.trim();
   const rating = $("#filterRating").value;
+  const memoTag = $("#filterMemoTag").value;
   const positive = $("#filterPositive").checked;
   const aOnly = $("#filterAOnly").checked;
 
@@ -2168,6 +2430,7 @@ function getFilteredRecords() {
     if (machine && !record.machine.includes(machine)) return false;
     if (unit && !String(record.unit).includes(unit)) return false;
     if (rating && record.rating !== rating) return false;
+    if (memoTag && !recordHasMemoTag(record, memoTag)) return false;
     if (positive && record.diff <= 0) return false;
     if (aOnly && record.rating !== "A") return false;
     return true;
@@ -2238,7 +2501,7 @@ function deleteRecord(id) {
 }
 
 function bindSummary() {
-  ["summaryGroup", "specialFrom", "specialTo", "specialDay", "specialWeekday", "specialDouble"].forEach((id) => {
+  ["summaryGroup", "specialFrom", "specialTo", "specialDay", "specialWeekday", "specialMemoTag", "specialDouble"].forEach((id) => {
     $(`#${id}`).addEventListener("input", renderSummary);
   });
 }
@@ -2248,6 +2511,7 @@ function specialFilteredRecords() {
   const to = $("#specialTo").value;
   const day = Number($("#specialDay").value);
   const weekday = $("#specialWeekday").value;
+  const memoTag = $("#specialMemoTag").value;
   const double = $("#specialDouble").checked;
   return state.records.filter((record) => {
     const date = new Date(`${record.date}T00:00:00`);
@@ -2255,6 +2519,7 @@ function specialFilteredRecords() {
     if (to && record.date > to) return false;
     if (day && date.getDate() !== day) return false;
     if (weekday !== "" && date.getDay() !== Number(weekday)) return false;
+    if (memoTag && !recordHasMemoTag(record, memoTag)) return false;
     if (double && !isDoubleDay(date)) return false;
     return true;
   });
@@ -2304,6 +2569,7 @@ function buildSpecialSummaryText(records) {
   const day = $("#specialDay").value;
   if (day) conditions.push(`毎月${day}日`);
   if ($("#specialDouble").checked) conditions.push("ゾロ目日");
+  if ($("#specialMemoTag").value) conditions.push(`メモ:${$("#specialMemoTag").value}`);
   const weekday = $("#specialWeekday");
   if (weekday.value !== "") conditions.push(`${weekday.options[weekday.selectedIndex].text}曜日`);
   return `検索条件：${conditions.join("・") || "全データ"} / 対象件数：${stats.count}件 / A評価：${stats.aCount}件 / 平均合算：${rateText(stats.avgTotalRate)} / 平均REG：${rateText(stats.avgRbRate)} / プラス台割合：${stats.positiveRate}%`;
@@ -2330,6 +2596,268 @@ function calculateStats(records) {
   };
 }
 
+
+function bindAnalysis() {
+  ["analysisStore", "analysisMachine", "analysisFrom", "analysisTo", "analysisRangeMode", "analysisCustomRanges"].forEach((id) => {
+    $(`#${id}`).addEventListener("input", () => {
+      state.analysisSelection = null;
+      renderAnalysis();
+    });
+  });
+  $("#unitHeatmap").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-unit-key]");
+    if (!button) return;
+    state.analysisSelection = button.dataset.unitKey;
+    renderAnalysis();
+    $("#unitDetailPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+function getAnalysisRecords() {
+  const store = $("#analysisStore").value;
+  const machine = $("#analysisMachine").value;
+  const from = $("#analysisFrom").value;
+  const to = $("#analysisTo").value;
+  return state.records.filter((record) => {
+    if (store && record.store !== store) return false;
+    if (machine && record.machine !== machine) return false;
+    if (from && record.date < from) return false;
+    if (to && record.date > to) return false;
+    return true;
+  });
+}
+
+function renderAnalysis() {
+  if (!$("#analysisStore")) return;
+  renderAnalysisOptions();
+  const records = getAnalysisRecords();
+  renderAnalysisKpis(records);
+  renderUnitHeatmap(records);
+  renderUnitDetail(records);
+  renderSpecialDateAnalysis(records);
+  renderRangeAnalysis(records);
+  renderAnalysisRanking(records);
+}
+
+function renderAnalysisOptions() {
+  const currentStore = $("#analysisStore").value;
+  const currentMachine = $("#analysisMachine").value;
+  const stores = unique(state.records.map((record) => record.store));
+  const machines = unique(state.records.map((record) => record.machine));
+  $("#analysisStore").innerHTML = `<option value="">全店舗</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+  $("#analysisMachine").innerHTML = `<option value="">全機種</option>${machines.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+  if (stores.includes(currentStore)) $("#analysisStore").value = currentStore;
+  if (machines.includes(currentMachine)) $("#analysisMachine").value = currentMachine;
+}
+
+function renderAnalysisKpis(records) {
+  const stats = calculateStats(records);
+  const dates = records.map((record) => record.date).sort();
+  const latestDate = dates[dates.length - 1] || "-";
+  const cards = [
+    ["対象データ", `${stats.count}件`, `直近日 ${latestDate}`],
+    ["平均差枚", formatDiff(stats.avgDiff), `プラス率 ${stats.positiveRate}%`],
+    ["平均RB", rateText(stats.avgRbRate), `平均合算 ${rateText(stats.avgTotalRate)}`],
+    ["A評価", `${stats.aCount}件`, `A評価率 ${percentage(stats.aCount, stats.count)}%`]
+  ];
+  $("#analysisKpis").innerHTML = cards.map(([label, value, note]) => `
+    <article class="analysis-kpi"><span>${label}</span><strong>${value}</strong><p>${note}</p></article>
+  `).join("");
+}
+
+function renderUnitHeatmap(records) {
+  const target = $("#unitHeatmap");
+  const grouped = Object.values(groupBy(records, unitGroupKey)).map(buildUnitStats).sort(compareUnitStats);
+  if (!grouped.length) {
+    target.innerHTML = `<div class="empty-card">条件に合う保存データがありません。</div>`;
+    return;
+  }
+  target.innerHTML = grouped.map((stats) => {
+    const classes = ["heatmap-card", stats.avgDiff >= 0 ? "diff-plus" : "diff-minus"];
+    if (stats.avgRbRate && stats.avgRbRate <= 300) classes.push("rb-strong");
+    if (stats.aCount >= 2) classes.push("a-strong");
+    if (state.analysisSelection === stats.key) classes.push("selected");
+    return `
+      <button class="${classes.join(" ")}" data-unit-key="${escapeHtml(stats.key)}" type="button">
+        <span class="heatmap-unit">${escapeHtml(stats.unit)}番</span>
+        <span class="heatmap-sub">${escapeHtml(stats.store)} / ${escapeHtml(stats.machine)}</span>
+        <span class="heatmap-main">平均差枚 ${formatDiff(stats.avgDiff)}</span>
+        <span>件数 ${stats.count} / 平均G ${stats.avgGames}</span>
+        <span>プラス ${stats.positiveRate}% / A ${stats.aCount}回</span>
+        <span>BB ${rateText(stats.avgBbRate)} / RB ${rateText(stats.avgRbRate)} / 合算 ${rateText(stats.avgTotalRate)}</span>
+        <span>直近 ${formatDiff(stats.latestDiff)} / 直近3回 ${formatDiff(stats.recent3Diff)}</span>
+      </button>
+    `;
+  }).join("");
+}
+
+function renderUnitDetail(records) {
+  const grouped = groupBy(records, unitGroupKey);
+  const selected = state.analysisSelection && grouped[state.analysisSelection]
+    ? state.analysisSelection
+    : Object.keys(grouped).sort((a, b) => compareUnitStats(buildUnitStats(grouped[a]), buildUnitStats(grouped[b])))[0];
+  state.analysisSelection = selected || null;
+  const items = selected ? grouped[selected].slice().sort((a, b) => b.date.localeCompare(a.date)) : [];
+  const latest = items[0];
+  $("#unitDetailHint").textContent = latest ? `${latest.store} / ${latest.machine} / ${latest.unit}番の履歴（新しい順）` : "ヒートマップの台番号を押すと時系列履歴を表示します。";
+  $("#unitSignals").innerHTML = latest ? buildUnitSignals(items).map((text) => `<span class="signal-chip">${escapeHtml(text)}</span>`).join("") : "";
+  $("#unitHistoryBody").innerHTML = items.map((record) => `
+    <tr>
+      <td>${escapeHtml(record.date)}</td><td>${escapeHtml(record.store)}</td><td>${escapeHtml(record.machine)}</td>
+      <td>${formatDiff(record.diff)}</td><td>${Number(record.games || 0).toLocaleString()}</td><td>${record.bb || 0}</td><td>${record.rb || 0}</td>
+      <td>${rateText(record.totalRate)}</td><td>${ratingPill(record.rating)}</td><td>${escapeHtml(record.memo || "")}</td>
+    </tr>
+  `).join("");
+}
+
+function renderSpecialDateAnalysis(records) {
+  const dayEntries = Array.from({ length: 31 }, (_, index) => index + 1).map((day) => [`${day}日`, records.filter((record) => recordDate(record).getDate() === day)]);
+  const weekdayLabels = ["日", "月", "火", "水", "木", "金", "土"];
+  const weekdayEntries = weekdayLabels.map((label, index) => [`${label}曜日`, records.filter((record) => recordDate(record).getDay() === index)]);
+  const doubleItems = records.filter((record) => isDoubleDay(recordDate(record)));
+  renderAnalysisStatList($("#dayOfMonthAnalysis"), dayEntries, { limit: 31 });
+  renderAnalysisStatList($("#weekdayAnalysis"), weekdayEntries, { limit: 7 });
+  renderAnalysisStatList($("#doubleDayAnalysis"), [["ゾロ目日", doubleItems], ["通常日", records.filter((record) => !isDoubleDay(recordDate(record)))]]);
+}
+
+function renderAnalysisStatList(target, entries, options = {}) {
+  const rows = entries.map(([label, items]) => ({ label, items, stats: calculateStats(items) }))
+    .filter((row) => row.stats.count > 0)
+    .sort((a, b) => b.stats.avgDiff - a.stats.avgDiff)
+    .slice(0, options.limit || 12);
+  target.innerHTML = rows.length ? rows.map(({ label, stats }) => analysisStatRow(label, stats)).join("") : `<div class="empty-card">該当データなし</div>`;
+}
+
+function analysisStatRow(label, stats) {
+  const strength = stats.avgDiff >= 500 || stats.positiveRate >= 60 || percentage(stats.aCount, stats.count) >= 30 ? "strong" : stats.avgDiff < 0 ? "weak" : "normal";
+  return `
+    <article class="analysis-row ${strength}">
+      <strong>${escapeHtml(label)}</strong>
+      <span>対象 ${stats.count}台</span>
+      <span>平均差枚 ${formatDiff(stats.avgDiff)}</span>
+      <span>プラス ${stats.positiveRate}%</span>
+      <span>平均RB ${rateText(stats.avgRbRate)}</span>
+      <span>A評価率 ${percentage(stats.aCount, stats.count)}%</span>
+    </article>
+  `;
+}
+
+function renderRangeAnalysis(records) {
+  const ranges = buildUnitRanges(records);
+  $("#rangeAnalysis").innerHTML = ranges.length ? ranges.map(({ label, items }) => analysisStatRow(label, calculateStats(items))).join("") : `<div class="empty-card">番号帯を作れるデータがありません。</div>`;
+}
+
+function renderAnalysisRanking(records) {
+  const ranges = buildUnitRanges(records);
+  const rangeByUnit = new Map();
+  ranges.forEach(({ label, items }) => items.forEach((record) => rangeByUnit.set(unitGroupKey(record), { label, stats: calculateStats(items) })));
+  const grouped = Object.values(groupBy(records, unitGroupKey));
+  const candidates = grouped.map((items) => buildAimCandidate(items, rangeByUnit.get(unitGroupKey(items[0]))))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10);
+  renderRanking($("#analysisRanking"), candidates.length ? candidates.map((item, index) => ({
+    title: `${index + 1}位：${item.latest.unit}番 ${item.latest.machine}（${item.score}pt）`,
+    rating: item.score >= 70 ? "A" : item.score >= 42 ? "B" : "C",
+    body: `${item.latest.store}。理由：${item.reasons.join("＋") || "履歴少なめ"}。直近 ${formatDiff(item.latest.diff)} / 番号帯 ${item.rangeLabel || "未分類"}`
+  })) : [{ title: "候補なし", rating: "要確認", body: "条件に合う保存データがありません。" }]);
+}
+
+function buildAimCandidate(items, rangeInfo) {
+  const sorted = items.slice().sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0];
+  const day = recordDate(latest).getDate();
+  const weekday = recordDate(latest).getDay();
+  const sameDay = items.filter((record) => recordDate(record).getDate() === day);
+  const sameWeekday = items.filter((record) => recordDate(record).getDay() === weekday);
+  const doubleItems = items.filter((record) => isDoubleDay(recordDate(record)));
+  const aCount = items.filter((record) => record.rating === "A").length;
+  const strongReg = items.filter((record) => record.rbRate && record.rbRate <= 300 && record.games >= 2500).length;
+  const recent3 = sorted.slice(0, 3);
+  const recentDip = recent3.reduce((sum, record) => sum + Number(record.diff || 0), 0) <= -1000 || latest.diff <= -1000;
+  const rangeStrong = rangeInfo?.stats?.avgDiff > 0 || rangeInfo?.stats?.positiveRate >= 55;
+  let score = sameDay.length * 8 + sameWeekday.length * 4 + doubleItems.length * 6 + aCount * 12 + strongReg * 10;
+  if (recentDip) score += 14;
+  if (rangeStrong) score += 12;
+  const reasons = [];
+  if (recentDip) reasons.push("直近凹み");
+  if (sameDay.length >= 2) reasons.push("同日付実績");
+  if (sameWeekday.length >= 2) reasons.push("同曜日実績");
+  if (doubleItems.length) reasons.push("ゾロ目日実績");
+  if (aCount) reasons.push(`A評価${aCount}回`);
+  if (strongReg) reasons.push("RB確率強め");
+  if (rangeStrong) reasons.push("番号帯強め");
+  return { latest, score, reasons, rangeLabel: rangeInfo?.label || "" };
+}
+
+function buildUnitStats(items) {
+  const sorted = items.slice().sort((a, b) => b.date.localeCompare(a.date));
+  const stats = calculateStats(items);
+  return {
+    ...stats,
+    key: unitGroupKey(items[0]),
+    store: items[0].store,
+    machine: items[0].machine,
+    unit: items[0].unit,
+    latestDiff: Number(sorted[0]?.diff || 0),
+    recent3Diff: sorted.slice(0, 3).reduce((sum, record) => sum + Number(record.diff || 0), 0)
+  };
+}
+
+function compareUnitStats(a, b) {
+  return numberValue(a.unit) - numberValue(b.unit) || a.store.localeCompare(b.store, "ja") || a.machine.localeCompare(b.machine, "ja");
+}
+
+function buildUnitSignals(items) {
+  const sorted = items.slice().sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0];
+  const recent3Diff = sorted.slice(0, 3).reduce((sum, record) => sum + Number(record.diff || 0), 0);
+  const signals = [];
+  if (latest?.diff <= -1000 || recent3Diff <= -1500) signals.push("直近凹み：上げ候補として要確認");
+  if (latest?.rating === "A" && latest.diff < 0) signals.push("据え置き候補：数値強めで差枚マイナス");
+  if (sorted.slice(0, 2).every((record) => record?.rating === "A")) signals.push("据え置き候補：A評価が連続");
+  if (sorted.some((record) => record.rbRate && record.rbRate <= 300)) signals.push("RB良好履歴あり");
+  return signals.length ? signals : ["大きな凹み・据え置きサインは弱め"];
+}
+
+function buildUnitRanges(records) {
+  const mode = $("#analysisRangeMode").value;
+  const customRanges = parseCustomRanges($("#analysisCustomRanges").value);
+  if (mode === "custom" && customRanges.length) {
+    return customRanges.map((range) => ({
+      label: `${range.from}〜${range.to}`,
+      items: records.filter((record) => numberValue(record.unit) >= range.from && numberValue(record.unit) <= range.to)
+    })).filter((range) => range.items.length);
+  }
+  const groups = groupBy(records.filter((record) => numberValue(record.unit) > 0), (record) => {
+    const unit = numberValue(record.unit);
+    const start = Math.floor(unit / 10) * 10;
+    return `${start}〜${start + 9}`;
+  });
+  return Object.entries(groups).sort(([a], [b]) => numberValue(a) - numberValue(b)).map(([label, items]) => ({ label, items }));
+}
+
+function parseCustomRanges(value) {
+  return String(value || "").split(",").map((chunk) => {
+    const match = chunk.trim().match(/^(\d+)\s*[-〜~]\s*(\d+)$/);
+    if (!match) return null;
+    const from = Number(match[1]);
+    const to = Number(match[2]);
+    return { from: Math.min(from, to), to: Math.max(from, to) };
+  }).filter(Boolean);
+}
+
+function unitGroupKey(record) {
+  return `${record.store}__${record.machine}__${record.unit}`;
+}
+
+function recordDate(record) {
+  return new Date(`${record.date}T00:00:00`);
+}
+
+function percentage(part, total) {
+  return total ? Math.round((part / total) * 100) : 0;
+}
+
 function bindRecommendations() {
   $("#makeRecommendButton").addEventListener("click", renderRecommendations);
 }
@@ -2338,54 +2866,187 @@ function renderRecommendations() {
   const targetDate = $("#recommendDate").value;
   const store = $("#recommendStore").value.trim();
   const machine = $("#recommendMachine").value.trim();
+  const memoTags = getSelectedMemoTags("#recommendMemoTags");
   const target = new Date(`${targetDate}T00:00:00`);
-  const day = target.getDate();
-  const weekday = target.getDay();
-  const double = isDoubleDay(target);
 
   const base = state.records.filter((record) => {
     if (store && record.store !== store) return false;
     if (machine && record.machine !== machine) return false;
+    if (targetDate && record.date >= targetDate) return false;
     return true;
   });
 
   const byUnit = groupBy(base, (record) => `${record.store}__${record.machine}__${record.unit}`);
-  const candidates = Object.values(byUnit).map((items) => {
-    const latest = items.slice().sort((a, b) => b.date.localeCompare(a.date))[0];
-    let score = 0;
-    const reasons = [];
-    const sameDay = items.filter((record) => new Date(`${record.date}T00:00:00`).getDate() === day);
-    const sameWeekday = items.filter((record) => new Date(`${record.date}T00:00:00`).getDay() === weekday);
-    const sameDouble = double ? items.filter((record) => isDoubleDay(new Date(`${record.date}T00:00:00`))) : [];
-    const aCount = items.filter((record) => record.rating === "A").length;
-    const strongReg = items.filter((record) => record.rbRate && record.rbRate <= 300 && record.games >= 3000).length;
-    const recent = items.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3);
-    const recentDip = recent.some((record) => record.diff < -1000);
+  const candidates = Object.values(byUnit)
+    .map((items) => buildRecommendationCandidate(items, target, base))
+    .sort((a, b) => b.score - a.score || b.stats.count - a.stats.count || String(a.unit).localeCompare(String(b.unit), "ja"))
+    .slice(0, 10)
+    .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
 
-    score += sameDay.length * 10 + sameWeekday.length * 4 + sameDouble.length * 8 + aCount * 12 + strongReg * 8;
-    if (recentDip) score += 9;
-    if (latest.rating === "A") score += 6;
-    if (latest.diff < -1000) score += 5;
-
-    if (sameDay.length) reasons.push(`同じ${day}日の履歴が${sameDay.length}件`);
-    if (double && sameDouble.length) reasons.push(`ゾロ目日の履歴あり`);
-    if (aCount) reasons.push(`A評価が${aCount}回`);
-    if (strongReg) reasons.push(`高回転でREGが強い履歴あり`);
-    if (recentDip) reasons.push(`直近で凹み後の候補`);
-
-    return {
-      title: `${latest.unit}番 ${latest.machine}`,
-      rating: score >= 45 ? "A" : score >= 24 ? "B" : "C",
-      body: `${latest.store}。${reasons.join("、") || "履歴は少なめです"}。注意点：過去データに基づく候補で、設定を断定するものではありません。`,
-      score
-    };
-  }).sort((a, b) => b.score - a.score).slice(0, 10);
-
-  renderRanking($("#recommendList"), candidates.length ? candidates : [{
+  renderRecommendationRanking($("#recommendList"), candidates.length ? candidates : [{
+    empty: true,
     title: "候補なし",
     rating: "要確認",
     body: "条件に合う保存データがありません。まずは台データを保存してください。"
   }]);
+}
+
+function buildRecommendationCandidate(items, target, base) {
+  const sorted = items.slice().sort((a, b) => b.date.localeCompare(a.date));
+  const latest = sorted[0];
+  const day = target.getDate();
+  const weekday = target.getDay();
+  const double = isDoubleDay(target);
+  const sameDay = items.filter((record) => new Date(`${record.date}T00:00:00`).getDate() === day);
+  const sameWeekday = items.filter((record) => new Date(`${record.date}T00:00:00`).getDay() === weekday);
+  const sameDouble = double ? items.filter((record) => isDoubleDay(new Date(`${record.date}T00:00:00`))) : [];
+  const recent = sorted.slice(0, 3);
+  const stats = calculateStats(items);
+  const sameDayStats = calculateStats(sameDay);
+  const sameWeekdayStats = calculateStats(sameWeekday);
+  const sameDoubleStats = calculateStats(sameDouble);
+  const recentDiffTotal = recent.reduce((sum, record) => sum + Number(record.diff || 0), 0);
+  const recentBigDip = recent.some((record) => record.diff <= -1000);
+  const latestBigDip = latest.diff <= -1000;
+  const bandItems = getSameBandRecords(latest, base);
+  const bandStats = calculateStats(bandItems);
+  const scoreParts = [];
+
+  addScorePart(scoreParts, sameDay.length * 8, sameDay.length ? `毎月${day}日の実績${sameDay.length}件` : "");
+  addScorePart(scoreParts, sameDayStats.aCount * 6, sameDayStats.aCount ? `毎月${day}日のA評価${sameDayStats.aCount}回` : "");
+  addScorePart(scoreParts, sameDayStats.avgDiff > 0 ? 5 : 0, sameDayStats.avgDiff > 0 ? `毎月${day}日の平均差枚 ${formatDiff(sameDayStats.avgDiff)}` : "");
+  addScorePart(scoreParts, sameWeekday.length * 3, sameWeekday.length ? `${weekdayName(weekday)}曜日の実績${sameWeekday.length}件` : "");
+  addScorePart(scoreParts, sameWeekdayStats.avgRbRate && sameWeekdayStats.avgRbRate <= 330 ? 8 : 0, sameWeekdayStats.avgRbRate && sameWeekdayStats.avgRbRate <= 330 ? `同曜日の平均REG ${rateText(sameWeekdayStats.avgRbRate)}` : "");
+  addScorePart(scoreParts, sameDouble.length * 7, double && sameDouble.length ? `ゾロ目日の実績${sameDouble.length}件` : "");
+  addScorePart(scoreParts, sameDoubleStats.aCount * 6, double && sameDoubleStats.aCount ? `ゾロ目日のA評価${sameDoubleStats.aCount}回` : "");
+  addScorePart(scoreParts, stats.aCount * 10, stats.aCount ? `A評価${stats.aCount}回` : "");
+  addScorePart(scoreParts, stats.avgRbRate && stats.avgRbRate <= 300 ? 16 : stats.avgRbRate && stats.avgRbRate <= 330 ? 10 : 0, stats.avgRbRate && stats.avgRbRate <= 330 ? `平均REG ${rateText(stats.avgRbRate)}` : "");
+  addScorePart(scoreParts, stats.avgTotalRate && stats.avgTotalRate <= 145 ? 12 : stats.avgTotalRate && stats.avgTotalRate <= 155 ? 7 : 0, stats.avgTotalRate && stats.avgTotalRate <= 155 ? `平均合算 ${rateText(stats.avgTotalRate)}` : "");
+  addScorePart(scoreParts, stats.avgDiff > 500 ? 10 : stats.avgDiff > 0 ? 5 : 0, stats.avgDiff > 0 ? `平均差枚 ${formatDiff(stats.avgDiff)}` : "");
+  addScorePart(scoreParts, stats.positiveRate >= 60 ? 8 : stats.positiveRate >= 50 ? 4 : 0, stats.positiveRate >= 50 ? `プラス率${stats.positiveRate}%` : "");
+  addScorePart(scoreParts, recentDiffTotal <= -2000 ? 12 : recentDiffTotal <= -1000 ? 7 : 0, recentDiffTotal <= -1000 ? `直近3回差枚合計 ${formatDiff(recentDiffTotal)}` : "");
+  addScorePart(scoreParts, recentBigDip ? 9 : 0, recentBigDip ? "直近で大きく凹みあり" : "");
+  addScorePart(scoreParts, latestBigDip ? 5 : 0, latestBigDip ? `最新履歴が${formatDiff(latest.diff)}で上げ狙い候補` : "");
+  addScorePart(scoreParts, bandStats.count >= 3 && bandStats.avgDiff > 0 ? 8 : 0, bandStats.count >= 3 && bandStats.avgDiff > 0 ? `同じ番号帯平均 ${formatDiff(bandStats.avgDiff)}` : "");
+  addScorePart(scoreParts, bandStats.count >= 3 && bandStats.positiveRate >= 60 ? 5 : 0, bandStats.count >= 3 && bandStats.positiveRate >= 60 ? `同じ番号帯プラス率${bandStats.positiveRate}%` : "");
+
+  const penaltyParts = [];
+  addScorePart(penaltyParts, stats.count <= 2 ? -10 : 0, stats.count <= 2 ? "データ件数が少ない" : "");
+  addScorePart(penaltyParts, stats.avgDiff < 0 ? -6 : 0, stats.avgDiff < 0 ? "平均差枚は弱め" : "");
+  addScorePart(penaltyParts, stats.aCount === 0 ? -6 : 0, stats.aCount === 0 ? "A評価回数が少ない" : "");
+  addScorePart(penaltyParts, !stats.avgRbRate || stats.avgRbRate > 360 ? -8 : 0, !stats.avgRbRate || stats.avgRbRate > 360 ? "REG実績が不足" : "");
+  addScorePart(penaltyParts, recent.length && recentDiffTotal > 0 ? -4 : 0, recent.length && recentDiffTotal > 0 ? "直近もプラスのため上げ狙いとしては弱い" : "");
+
+  const score = Math.max(0, Math.round([...scoreParts, ...penaltyParts].reduce((sum, part) => sum + part.points, 0)));
+  return {
+    title: `${latest.unit}番 ${latest.machine}`,
+    unit: latest.unit,
+    machine: latest.machine,
+    store: latest.store,
+    rating: score >= 70 ? "A" : score >= 38 ? "B" : "C",
+    score,
+    stats,
+    confidence: confidenceByCount(stats.count),
+    reason: buildRecommendationReason(scoreParts, stats, sameDayStats, sameDoubleStats, bandStats),
+    concerns: buildRecommendationConcerns(penaltyParts, stats),
+    recentHistory: recent.map(formatRecentHistory)
+  };
+}
+
+function addScorePart(parts, points, label) {
+  if (!points || !label) return;
+  parts.push({ points, label });
+}
+
+function buildRecommendationReason(scoreParts, stats, sameDayStats, sameDoubleStats, bandStats) {
+  const positives = scoreParts.filter((part) => part.points > 0).sort((a, b) => b.points - a.points).map((part) => part.label);
+  if (!positives.length) return "スコア加点は少ないですが、保存データの比較対象として候補に残ります。";
+  const selected = positives.slice(0, 4);
+  const details = [];
+  if (stats.avgRbRate) details.push(`平均REG ${rateText(stats.avgRbRate)}`);
+  if (stats.avgTotalRate) details.push(`平均合算 ${rateText(stats.avgTotalRate)}`);
+  details.push(`平均差枚 ${formatDiff(stats.avgDiff)}`);
+  details.push(`プラス率${stats.positiveRate}%`);
+  if (sameDayStats.count) details.push(`同日付平均 ${formatDiff(sameDayStats.avgDiff)}`);
+  if (sameDoubleStats.count) details.push(`ゾロ目日A評価${sameDoubleStats.aCount}回`);
+  if (bandStats.count >= 3) details.push(`番号帯平均 ${formatDiff(bandStats.avgDiff)}`);
+  return `${selected.join("、")}が主な加点です。${details.join(" / ")}。`;
+}
+
+function buildRecommendationConcerns(penaltyParts, stats) {
+  const concerns = penaltyParts.filter((part) => part.points < 0).map((part) => part.label);
+  if (stats.count <= 5 && !concerns.includes("データ件数が少ない")) concerns.push("データ件数はまだ多くありません");
+  if (!concerns.length) concerns.push("大きな不安材料は少なめですが、過去データのみの判定です");
+  return unique(concerns);
+}
+
+function confidenceByCount(count) {
+  if (count >= 6) return "高";
+  if (count >= 3) return "中";
+  return "低";
+}
+
+function getSameBandRecords(record, records) {
+  const unit = Number(record.unit);
+  if (!Number.isFinite(unit)) return [];
+  const bandStart = Math.floor(unit / 10) * 10;
+  const bandEnd = bandStart + 9;
+  return records.filter((item) => {
+    if (item.store !== record.store || item.machine !== record.machine) return false;
+    const itemUnit = Number(item.unit);
+    return Number.isFinite(itemUnit) && itemUnit >= bandStart && itemUnit <= bandEnd;
+  });
+}
+
+function formatRecentHistory(record) {
+  return `${record.date} ${record.unit}番 ${formatDiff(record.diff)} ${record.rating || "要確認"} REG${rateText(record.rbRate)} 合算${rateText(record.totalRate)}`;
+}
+
+function weekdayName(day) {
+  return ["日", "月", "火", "水", "木", "金", "土"][day] || "";
+}
+
+function renderRecommendationRanking(target, items) {
+  target.innerHTML = "";
+  items.forEach((item) => {
+    const article = document.createElement("article");
+    article.className = "rank-item recommendation-item";
+    if (item.empty) {
+      article.innerHTML = `
+        <div class="rank-title">
+          <strong>${escapeHtml(item.title)}</strong>
+          ${ratingPill(item.rating)}
+        </div>
+        <p>${escapeHtml(item.body)}</p>
+      `;
+    } else {
+      article.innerHTML = `
+        <div class="rank-title">
+          <strong>${item.rank}位：${escapeHtml(item.unit)}番 ${escapeHtml(item.machine)}</strong>
+          ${ratingPill(item.rating)}
+        </div>
+        <div class="recommend-meta">
+          <span>店舗：${escapeHtml(item.store)}</span>
+          <span>おすすめ度：${escapeHtml(item.rating)}</span>
+          <span>スコア：${item.score}</span>
+          <span>信頼度：${escapeHtml(item.confidence)}（${item.stats.count}件）</span>
+        </div>
+        <div class="recommend-block">
+          <strong>理由</strong>
+          <p>${escapeHtml(item.reason)}</p>
+        </div>
+        <div class="recommend-block concern">
+          <strong>不安材料</strong>
+          <p>${escapeHtml(item.concerns.join("、"))}</p>
+        </div>
+        <div class="recommend-block">
+          <strong>直近履歴</strong>
+          <ul>${item.recentHistory.map((history) => `<li>${escapeHtml(history)}</li>`).join("")}</ul>
+        </div>
+      `;
+    }
+    target.appendChild(article);
+  });
 }
 
 function bindMasters() {
@@ -2571,6 +3232,7 @@ function renderAll() {
   renderOptions();
   renderRecords();
   renderSummary();
+  renderAnalysis();
   renderMasters();
   $("#storageStatus").textContent = `保存 ${state.records.length}件`;
 }
@@ -2578,10 +3240,28 @@ function renderAll() {
 function renderOptions() {
   const stores = unique(state.stores);
   const machines = unique([...state.records.map((record) => record.machine), ...state.masters.map((master) => master.name)]);
+  const memoTags = normalizeMemoTags(state.memoTags);
+  state.memoTags = memoTags;
   $("#storeList").innerHTML = stores.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
   $("#storeSelect").innerHTML = `<option value="">店舗を選択</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
   $("#machineList").innerHTML = machines.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+  renderMemoTagSelect("#memoTagSelect", memoTags, "保存済みタグを選択");
+  renderMemoTagSelect("#filterMemoTag", memoTags, "すべて");
+  renderMemoTagSelect("#specialMemoTag", memoTags, "すべて");
+  renderMemoTagSelect("#recommendMemoTags", memoTags);
 }
+
+function renderMemoTagSelect(selector, tags, emptyLabel) {
+  const select = $(selector);
+  if (!select) return;
+  const current = new Set([...select.selectedOptions].map((option) => option.value));
+  const emptyOption = emptyLabel === undefined ? "" : `<option value="">${escapeHtml(emptyLabel)}</option>`;
+  select.innerHTML = `${emptyOption}${tags.map((tag) => `<option value="${escapeHtml(tag)}">${escapeHtml(tag)}</option>`).join("")}`;
+  [...select.options].forEach((option) => {
+    option.selected = current.has(option.value);
+  });
+}
+
 
 function renderRanking(target, items) {
   target.innerHTML = "";
@@ -2716,36 +3396,100 @@ function parseCsv(text) {
   return rows;
 }
 
+function buildRecordDuplicateKey(record) {
+  return [record.date, record.store, record.machine, record.unit]
+    .map((value) => String(value ?? "").trim())
+    .join("\u001f");
+}
+
+function createRecordFromCsvRow(row) {
+  return {
+    id: uid("record"),
+    date: row[0] || "",
+    store: row[1] || "",
+    machine: row[2] || "",
+    unit: row[3] || "",
+    games: numberValue(row[4]),
+    bb: numberValue(row[5]),
+    rb: numberValue(row[6]),
+    bbRate: numberValue(row[7]) || null,
+    rbRate: numberValue(row[8]) || null,
+    totalRate: numberValue(row[9]) || null,
+    diff: numberValue(row[10]),
+    rating: row[11] || "要確認",
+    expectation: numberValue(row[12]),
+    confidence: row[13] || "低",
+    reason: row[14] || "",
+    nearestSettings: row[15] || "-",
+    memo: row[16] || "",
+    createdAt: row[17] || new Date().toISOString()
+  };
+}
+
+function chooseDuplicateImportAction(duplicateCount) {
+  if (!duplicateCount) return "add";
+  const choice = prompt(
+    `重複データが${duplicateCount}件あります。処理を選択してください。\n` +
+      "1: 上書きする\n" +
+      "2: 取り込まない\n" +
+      "3: 別データとして追加する",
+    "1"
+  );
+  if (choice === null) return "cancel";
+  const normalized = choice.trim();
+  if (normalized === "1" || normalized === "上書き" || normalized === "上書きする") return "overwrite";
+  if (normalized === "2" || normalized === "取り込まない" || normalized === "スキップ") return "skip";
+  if (normalized === "3" || normalized === "追加" || normalized === "別データとして追加する") return "add";
+  alert("1、2、3のいずれかを入力してください。CSV取込を中止しました。");
+  return "cancel";
+}
+
 function importRecordsCsv(file) {
-  if (!file) return;
-  file.text().then((text) => {
+  if (!file) return Promise.resolve();
+  return file.text().then((text) => {
     const [, ...rows] = parseCsv(text.replace(/^\ufeff/, ""));
-    rows.forEach((row) => {
-      const record = {
-        id: uid("record"),
-        date: row[0] || "",
-        store: row[1] || "",
-        machine: row[2] || "",
-        unit: row[3] || "",
-        games: numberValue(row[4]),
-        bb: numberValue(row[5]),
-        rb: numberValue(row[6]),
-        bbRate: numberValue(row[7]) || null,
-        rbRate: numberValue(row[8]) || null,
-        totalRate: numberValue(row[9]) || null,
-        diff: numberValue(row[10]),
-        rating: row[11] || "要確認",
-        expectation: numberValue(row[12]),
-        confidence: row[13] || "低",
-        reason: row[14] || "",
-        nearestSettings: row[15] || "-",
-        memo: row[16] || "",
-        createdAt: row[17] || new Date().toISOString()
-      };
-      state.records.push(record);
+    const importedRecords = rows.map(createRecordFromCsvRow);
+    const duplicateMap = new Map();
+    state.records.forEach((record, index) => {
+      const key = buildRecordDuplicateKey(record);
+      if (!key) return;
+      const duplicate = duplicateMap.get(key);
+      if (duplicate) duplicate.extraIndices.push(index);
+      else duplicateMap.set(key, { record, index, extraIndices: [] });
     });
+
+    const duplicates = importedRecords.filter((record) => duplicateMap.has(buildRecordDuplicateKey(record)));
+    const action = chooseDuplicateImportAction(duplicates.length);
+    if (action === "cancel") return;
+
+    let addedCount = 0;
+    let overwrittenCount = 0;
+    let skippedCount = 0;
+    const duplicateIndexesToRemove = new Set();
+
+    importedRecords.forEach((record) => {
+      const duplicate = duplicateMap.get(buildRecordDuplicateKey(record));
+      if (!duplicate || action === "add") {
+        state.records.push(record);
+        addedCount += 1;
+        return;
+      }
+      if (action === "skip") {
+        skippedCount += 1;
+        return;
+      }
+      state.records[duplicate.index] = { ...record, id: duplicate.record.id };
+      duplicate.extraIndices.forEach((index) => duplicateIndexesToRemove.add(index));
+      overwrittenCount += 1;
+    });
+
+    if (duplicateIndexesToRemove.size) {
+      state.records = state.records.filter((_, index) => !duplicateIndexesToRemove.has(index));
+    }
+
     saveJson(STORAGE_KEYS.records, state.records);
     renderAll();
+    alert(`CSV取込が完了しました。追加: ${addedCount}件 / 上書き: ${overwrittenCount}件 / 未取込: ${skippedCount}件`);
   });
 }
 
