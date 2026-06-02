@@ -2442,9 +2442,9 @@ function ocrStatusBadge(status, confidence) {
 
 function normalizeNumberText(value) {
   return String(value ?? "")
-    .replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
+    .normalize("NFKC")
     .replace(/[−ー－―ｰ–—‐-]/g, "-")
-    .replace(/,/g, "")
+    .replace(/[,，]/g, "")
     .trim();
 }
 
@@ -2586,6 +2586,20 @@ function renderReadOnlyRecordRow(record) {
   `;
 }
 
+function renderDiffEditInput(record) {
+  return `<input
+    type="text"
+    inputmode="text"
+    autocomplete="off"
+    autocorrect="off"
+    spellcheck="false"
+    pattern="[\\-ー－−―ｰ–—‐]?[0-9０-９,，]*"
+    data-edit-field="diff"
+    value="${escapeHtml(Number(record.diff || 0))}"
+    placeholder="例：ー500 / -500"
+  >`;
+}
+
 function renderEditableRecordRow(record) {
   return `
     <td><input type="date" data-edit-field="date" value="${escapeHtml(record.date)}"></td>
@@ -2598,7 +2612,7 @@ function renderEditableRecordRow(record) {
       <input type="number" inputmode="numeric" data-edit-field="rb" aria-label="RB" value="${Number(record.rb || 0)}">
     </td>
     <td>${rateText(record.totalRate)}</td>
-    <td><input type="number" inputmode="numeric" data-edit-field="diff" value="${Number(record.diff || 0)}"></td>
+    <td>${renderDiffEditInput(record)}</td>
     <td>${ratingPill(record.rating)}</td>
     <td class="reason-cell">${escapeHtml(record.reason || "")}</td>
     <td><textarea data-edit-field="memo" rows="3">${escapeHtml(record.memo || "")}</textarea></td>
@@ -2898,7 +2912,7 @@ function renderSummaryEditableRecordRow(record) {
       <input type="number" inputmode="numeric" data-edit-field="rb" aria-label="RB" value="${Number(record.rb || 0)}">
     </td>
     <td>${rateText(record.totalRate)}</td>
-    <td><input type="number" inputmode="numeric" data-edit-field="diff" value="${Number(record.diff || 0)}"></td>
+    <td>${renderDiffEditInput(record)}</td>
     <td>${ratingPill(record.rating)}</td>
     <td><textarea data-edit-field="memo" rows="3">${escapeHtml(record.memo || "")}</textarea></td>
     <td class="row-actions">
@@ -2972,10 +2986,16 @@ function calculateStats(records) {
 
 function bindAnalysis() {
   ["analysisStore", "analysisMachine", "analysisFrom", "analysisTo", "analysisRangeMode", "analysisCustomRanges"].forEach((id) => {
-    $(`#${id}`).addEventListener("input", () => {
+    const element = $(`#${id}`);
+    if (!element) return;
+
+    const handler = () => {
       state.analysisSelection = null;
       renderAnalysis();
-    });
+    };
+
+    element.addEventListener("input", handler);
+    element.addEventListener("change", handler);
   });
   $("#unitHeatmap").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-unit-key]");
@@ -3117,7 +3137,10 @@ function analysisStatRow(label, stats) {
 
 function renderRangeAnalysis(records) {
   const ranges = buildUnitRanges(records);
-  $("#rangeAnalysis").innerHTML = ranges.length ? ranges.map(({ label, items }) => analysisStatRow(label, calculateStats(items))).join("") : `<div class="empty-card">番号帯を作れるデータがありません。</div>`;
+  const summary = analysisRangeSummary();
+  const summaryTarget = $("#analysisRangeSummary");
+  if (summaryTarget) summaryTarget.textContent = summary;
+  $("#rangeAnalysis").innerHTML = ranges.length ? ranges.map(({ label, items }) => analysisStatRow(label, calculateStats(items))).join("") : `<div class="empty-card">${escapeHtml(summary === "番号帯：10台単位" ? "番号帯を作れるデータがありません。" : summary)}</div>`;
 }
 
 function renderAnalysisRanking(records) {
@@ -3193,9 +3216,10 @@ function buildUnitSignals(items) {
 }
 
 function buildUnitRanges(records) {
-  const mode = $("#analysisRangeMode").value;
-  const customRanges = parseCustomRanges($("#analysisCustomRanges").value);
-  if (mode === "custom" && customRanges.length) {
+  const mode = $("#analysisRangeMode")?.value || "10";
+  const customRanges = parseCustomRanges($("#analysisCustomRanges")?.value);
+  if (mode === "custom") {
+    if (!customRanges.length) return [];
     return customRanges.map((range) => ({
       label: `${range.from}〜${range.to}`,
       items: records.filter((record) => numberValue(record.unit) >= range.from && numberValue(record.unit) <= range.to)
@@ -3209,14 +3233,28 @@ function buildUnitRanges(records) {
   return Object.entries(groups).sort(([a], [b]) => numberValue(a) - numberValue(b)).map(([label, items]) => ({ label, items }));
 }
 
+function analysisRangeSummary() {
+  const mode = $("#analysisRangeMode")?.value || "10";
+  if (mode !== "custom") return "番号帯：10台単位";
+  const customRanges = parseCustomRanges($("#analysisCustomRanges")?.value);
+  if (!customRanges.length) return "任意範囲が未設定です";
+  return `番号帯：${customRanges.map((range) => `${range.from}〜${range.to}`).join(" / ")}`;
+}
+
 function parseCustomRanges(value) {
-  return String(value || "").split(",").map((chunk) => {
-    const match = chunk.trim().match(/^(\d+)\s*[-〜~]\s*(\d+)$/);
-    if (!match) return null;
+  const text = String(value || "").normalize("NFKC").trim();
+  if (!text) return [];
+
+  const ranges = [];
+  const chunks = text.split(/[,、]/);
+  for (const chunk of chunks) {
+    const match = chunk.trim().match(/^(\d+)\s*[-〜~ー－～]\s*(\d+)$/);
+    if (!match) return [];
     const from = Number(match[1]);
     const to = Number(match[2]);
-    return { from: Math.min(from, to), to: Math.max(from, to) };
-  }).filter(Boolean);
+    ranges.push({ from: Math.min(from, to), to: Math.max(from, to) });
+  }
+  return ranges;
 }
 
 function unitGroupKey(record) {
