@@ -183,9 +183,21 @@
 
       <div class="filter-grid">
         <label>日付<input type="date" id="filterDate"></label>
-        <label>店舗<input id="filterStore" placeholder="店舗で検索"></label>
-        <label>機種<input id="filterMachine" placeholder="機種で検索"></label>
-        <label>台番号<input id="filterUnit" placeholder="台番号"></label>
+        <label>店舗
+          <select id="filterStore">
+            <option value="">すべて</option>
+          </select>
+        </label>
+        <label>機種
+          <select id="filterMachine">
+            <option value="">すべて</option>
+          </select>
+        </label>
+        <label>台番号
+          <select id="filterUnit">
+            <option value="">すべて</option>
+          </select>
+        </label>
         <label>評価
           <select id="filterRating">
             <option value="">すべて</option>
@@ -204,6 +216,26 @@
         <label class="check"><input type="checkbox" id="filterAOnly"> A評価のみ</label>
       </div>
 
+      <details class="advanced-search">
+        <summary>詳細検索（文字入力）</summary>
+        <div class="filter-grid">
+          <label>店舗名を含む<input id="filterStoreText" placeholder="店舗名の一部"></label>
+          <label>機種名を含む<input id="filterMachineText" placeholder="機種名の一部"></label>
+          <label>台番号を含む<input id="filterUnitText" placeholder="台番号の一部"></label>
+        </div>
+      </details>
+
+      <div class="bulk-tag-panel">
+        <label>検索結果に一括操作するメモタグ
+          <select id="bulkMemoTags" multiple size="4" aria-label="一括操作するメモタグ"></select>
+        </label>
+        <div class="action-row">
+          <button class="secondary" id="bulkAddTagButton" type="button">検索結果にタグ追加</button>
+          <button class="danger subtle" id="bulkRemoveTagButton" type="button">検索結果からタグ削除</button>
+        </div>
+        <p class="muted">現在の検索結果すべてが対象です。既存メモは上書きせず、タグは「 / 」区切りで追加・削除します。</p>
+      </div>
+
       <div class="action-row">
         <button id="exportLatestRecordsButton" type="button">最新版CSV出力</button>
         <button class="secondary" id="exportDatedRecordsButton" type="button">日付付きCSV出力</button>
@@ -211,7 +243,7 @@
         <label class="file-button">CSV取込<input type="file" id="importRecordsInput" accept=".csv,text/csv"></label>
         <button class="danger subtle" id="deleteAllRecordsButton" type="button">全削除</button>
       </div>
-      <p class="csv-export-note">スマホのブラウザによっては、同名ファイルでも自動上書きされず、(1) 付きで保存される場合があります。再判定前にCSVバックアップをおすすめします。</p>
+      <p class="csv-export-note">一覧上で直接編集できます。編集前・一括タグ操作前には、万一に備えてCSVバックアップ（最新版CSV出力）をおすすめします。スマホのブラウザによっては、同名ファイルでも自動上書きされず、(1) 付きで保存される場合があります。</p>
 
       <div class="table-wrap">
         <table class="data-table compact" id="recordsTable">
@@ -227,6 +259,7 @@
               <th data-sort="diff">差枚</th>
               <th data-sort="rating">評価</th>
               <th>理由</th>
+              <th>メモ</th>
               <th></th>
             </tr>
           </thead>
