@@ -27,7 +27,9 @@ const state = {
   sort: { key: "date", direction: "desc" },
   analysisSelection: null,
   ocrPreview: { files: [], settings: [], currentIndex: 0, image: null },
-  editingRecordId: null
+  editingRecordId: null,
+  recordsScopeIds: null,
+  suppressRecordFilterClear: false
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -2400,6 +2402,7 @@ function bindRecords() {
     const element = $(`#${id}`);
     if (!element) return;
     element.addEventListener("input", () => {
+      if (!state.suppressRecordFilterClear) state.recordsScopeIds = null;
       if (["filterDate", "filterStore", "filterMachine"].includes(id)) renderFilterOptions();
       renderRecords();
     });
@@ -2446,6 +2449,7 @@ function getFilteredRecords() {
   const filters = getRecordFilters();
 
   return state.records.filter((record) => {
+    if (state.recordsScopeIds && !state.recordsScopeIds.has(record.id)) return false;
     if (filters.date && record.date !== filters.date) return false;
     if (filters.store && record.store !== filters.store) return false;
     if (filters.machine && record.machine !== filters.machine) return false;
@@ -2492,7 +2496,7 @@ function renderRecords() {
     const cancelId = button.dataset.cancel;
     const deleteId = button.dataset.delete;
     if (editId) startInlineEdit(editId);
-    if (saveId) saveInlineRecord(saveId);
+    if (saveId) saveInlineRecord(saveId, button.closest("tr"));
     if (cancelId) cancelInlineEdit();
     if (deleteId) deleteRecord(deleteId);
   };
@@ -2551,8 +2555,11 @@ function cancelInlineEdit() {
   renderRecords();
 }
 
-function saveInlineRecord(id) {
-  const row = $(`button[data-save="${cssEscape(id)}"]`)?.closest("tr");
+function saveInlineRecord(id, row) {
+  saveRecordFromRow(id, row);
+}
+
+function saveRecordFromRow(id, row) {
   const index = state.records.findIndex((item) => item.id === id);
   if (!row || index === -1) return;
 
@@ -2600,11 +2607,6 @@ function getInlineFieldValue(row, field) {
   return $(`[data-edit-field="${field}"]`, row)?.value || "";
 }
 
-function cssEscape(value) {
-  if (window.CSS?.escape) return CSS.escape(value);
-  return String(value).replace(/"/g, '\\"');
-}
-
 function editRecord(id) {
   startInlineEdit(id);
 }
@@ -2617,26 +2619,57 @@ function deleteRecord(id) {
 }
 
 function bindSummary() {
-  ["summaryGroup", "specialFrom", "specialTo", "specialDay", "specialWeekday", "specialMemoTag", "specialDouble"].forEach((id) => {
-    $(`#${id}`).addEventListener("input", renderSummary);
+  ["summaryGroup", "specialFrom", "specialTo", "specialDay", "specialWeekday", "specialStore", "specialMachine", "specialUnit", "specialMemoTag", "specialRating", "specialDouble", "specialPositive", "specialAOnly"].forEach((id) => {
+    const element = $(`#${id}`);
+    if (!element) return;
+    element.addEventListener("input", () => {
+      if (["specialFrom", "specialTo", "specialDay", "specialWeekday", "specialStore", "specialMachine", "specialDouble"].includes(id)) renderSummaryFilterOptions();
+      renderSummary();
+    });
   });
+  $("#summaryBulkAddTagButton")?.addEventListener("click", () => bulkUpdateSummaryMemoTags("add"));
+  $("#summaryBulkRemoveTagButton")?.addEventListener("click", () => bulkUpdateSummaryMemoTags("remove"));
+  $("#openRecordsWithSummaryFiltersButton")?.addEventListener("click", openRecordsWithSummaryFilters);
+}
+
+function getSummaryFilters() {
+  return {
+    from: $("#specialFrom")?.value || "",
+    to: $("#specialTo")?.value || "",
+    day: Number($("#specialDay")?.value || 0),
+    weekday: $("#specialWeekday")?.value ?? "",
+    store: $("#specialStore")?.value || "",
+    machine: $("#specialMachine")?.value || "",
+    unit: $("#specialUnit")?.value || "",
+    memoTag: $("#specialMemoTag")?.value || "",
+    rating: $("#specialRating")?.value || "",
+    double: Boolean($("#specialDouble")?.checked),
+    positive: Boolean($("#specialPositive")?.checked),
+    aOnly: Boolean($("#specialAOnly")?.checked)
+  };
+}
+
+function matchesSummaryDateFilters(record, filters) {
+  const date = new Date(`${record.date}T00:00:00`);
+  if (filters.from && record.date < filters.from) return false;
+  if (filters.to && record.date > filters.to) return false;
+  if (filters.day && date.getDate() !== filters.day) return false;
+  if (filters.weekday !== "" && date.getDay() !== Number(filters.weekday)) return false;
+  if (filters.double && !isDoubleDay(date)) return false;
+  return true;
 }
 
 function specialFilteredRecords() {
-  const from = $("#specialFrom").value;
-  const to = $("#specialTo").value;
-  const day = Number($("#specialDay").value);
-  const weekday = $("#specialWeekday").value;
-  const memoTag = $("#specialMemoTag").value;
-  const double = $("#specialDouble").checked;
+  const filters = getSummaryFilters();
   return state.records.filter((record) => {
-    const date = new Date(`${record.date}T00:00:00`);
-    if (from && record.date < from) return false;
-    if (to && record.date > to) return false;
-    if (day && date.getDate() !== day) return false;
-    if (weekday !== "" && date.getDay() !== Number(weekday)) return false;
-    if (memoTag && !recordHasMemoTag(record, memoTag)) return false;
-    if (double && !isDoubleDay(date)) return false;
+    if (!matchesSummaryDateFilters(record, filters)) return false;
+    if (filters.store && record.store !== filters.store) return false;
+    if (filters.machine && record.machine !== filters.machine) return false;
+    if (filters.unit && String(record.unit) !== filters.unit) return false;
+    if (filters.memoTag && !recordHasMemoTag(record, filters.memoTag)) return false;
+    if (filters.rating && record.rating !== filters.rating) return false;
+    if (filters.positive && record.diff <= 0) return false;
+    if (filters.aOnly && record.rating !== "A") return false;
     return true;
   });
 }
@@ -2648,21 +2681,22 @@ function isDoubleDay(date) {
 }
 
 function renderSummary() {
+  renderSummaryFilterOptions();
   const records = specialFilteredRecords();
   const groupKey = $("#summaryGroup").value;
-  const groups = groupBy(records, (record) => record[groupKey] || "未入力");
+  const groups = buildSummaryGroups(records, groupKey);
   const cards = $("#summaryCards");
   cards.innerHTML = "";
   $("#specialSummary").textContent = buildSpecialSummaryText(records);
 
-  Object.entries(groups).sort(([a], [b]) => a.localeCompare(b, "ja")).forEach(([key, items]) => {
+  Object.entries(groups).sort(([a], [b]) => compareSummaryGroupLabels(a, b, groupKey)).forEach(([key, items]) => {
     const stats = calculateStats(items);
     const card = document.createElement("article");
     card.className = "summary-card";
     card.innerHTML = `
       <span>${escapeHtml(key)}</span>
       <strong>${stats.count}台</strong>
-      <p class="muted">平均G ${stats.avgGames} / 合算 ${rateText(stats.avgTotalRate)} / REG ${rateText(stats.avgRbRate)}</p>
+      <p class="muted">平均G ${stats.avgGames.toLocaleString()} / BIG ${rateText(stats.avgBbRate)} / REG ${rateText(stats.avgRbRate)} / 合算 ${rateText(stats.avgTotalRate)}</p>
       <p class="muted">平均差枚 ${formatDiff(stats.avgDiff)} / プラス ${stats.positiveRate}% / A ${stats.aCount}台 / B ${stats.bCount}台 / C ${stats.cCount}台</p>
     `;
     cards.appendChild(card);
@@ -2677,18 +2711,177 @@ function renderSummary() {
     rating: record.rating,
     body: `${record.store} / ${record.date} / ${rateText(record.totalRate)} / REG ${rateText(record.rbRate)} / ${formatDiff(record.diff)}。${record.reason || ""}`
   })));
+  renderSummaryRecords(records);
+}
+
+function buildSummaryGroups(records, groupKey) {
+  if (groupKey === "memoTag") {
+    return records.reduce((groups, record) => {
+      const tags = splitMemoParts(record.memo);
+      (tags.length ? tags : ["メモなし"]).forEach((tag) => {
+        groups[tag] ??= [];
+        groups[tag].push(record);
+      });
+      return groups;
+    }, {});
+  }
+  if (groupKey === "weekday") return groupBy(records, (record) => weekdayLabel(new Date(`${record.date}T00:00:00`).getDay()));
+  if (groupKey === "monthDay") return groupBy(records, (record) => `${new Date(`${record.date}T00:00:00`).getDate()}日`);
+  if (groupKey === "unitRange") return groupBy(records, (record) => unitRangeLabel(record.unit));
+  return groupBy(records, (record) => record[groupKey] || "未入力");
+}
+
+
+function compareSummaryGroupLabels(a, b, groupKey) {
+  if (["monthDay", "unitRange", "unit"].includes(groupKey)) {
+    const an = Number(normalizeNumberText(a));
+    const bn = Number(normalizeNumberText(b));
+    if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
+  }
+  if (groupKey === "weekday") {
+    const order = { "日": 0, "月": 1, "火": 2, "水": 3, "木": 4, "金": 5, "土": 6 };
+    if (order[a] !== undefined && order[b] !== undefined) return order[a] - order[b];
+  }
+  return a.localeCompare(b, "ja");
+}
+
+function weekdayLabel(day) {
+  return ["日", "月", "火", "水", "木", "金", "土"][day] || "未入力";
+}
+
+function unitRangeLabel(unit) {
+  const number = Number(normalizeNumberText(unit));
+  if (!Number.isFinite(number)) return "番号不明";
+  const start = Math.floor(number / 10) * 10;
+  return `${start}〜${start + 9}`;
 }
 
 function buildSpecialSummaryText(records) {
   const stats = calculateStats(records);
   const conditions = [];
-  const day = $("#specialDay").value;
-  if (day) conditions.push(`毎月${day}日`);
-  if ($("#specialDouble").checked) conditions.push("ゾロ目日");
-  if ($("#specialMemoTag").value) conditions.push(`メモ:${$("#specialMemoTag").value}`);
+  const filters = getSummaryFilters();
+  if (filters.from) conditions.push(`開始:${filters.from}`);
+  if (filters.to) conditions.push(`終了:${filters.to}`);
+  if (filters.store) conditions.push(filters.store);
+  if (filters.machine) conditions.push(filters.machine);
+  if (filters.unit) conditions.push(`${filters.unit}番`);
+  if (filters.day) conditions.push(`毎月${filters.day}日`);
+  if (filters.double) conditions.push("ゾロ目日");
+  if (filters.memoTag) conditions.push(`メモ:${filters.memoTag}`);
+  if (filters.rating) conditions.push(`評価:${filters.rating}`);
+  if (filters.positive) conditions.push("差枚プラスのみ");
+  if (filters.aOnly) conditions.push("A評価のみ");
   const weekday = $("#specialWeekday");
-  if (weekday.value !== "") conditions.push(`${weekday.options[weekday.selectedIndex].text}曜日`);
-  return `検索条件：${conditions.join("・") || "全データ"} / 対象件数：${stats.count}件 / A評価：${stats.aCount}件 / 平均合算：${rateText(stats.avgTotalRate)} / 平均REG：${rateText(stats.avgRbRate)} / プラス台割合：${stats.positiveRate}%`;
+  if (filters.weekday !== "") conditions.push(`${weekday.options[weekday.selectedIndex].text}曜日`);
+  return `検索条件：${conditions.join("・") || "全データ"} / 対象件数：${stats.count}件 / A評価：${stats.aCount}件 / 平均G：${stats.avgGames.toLocaleString()} / 平均差枚：${formatDiff(stats.avgDiff)} / 平均BB：${rateText(stats.avgBbRate)} / 平均REG：${rateText(stats.avgRbRate)} / 平均合算：${rateText(stats.avgTotalRate)} / プラス率：${stats.positiveRate}%`;
+}
+
+function renderSummaryRecords(records) {
+  const tbody = $("#summaryRecordsTable tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  records.slice().sort((a, b) => compareBySort(a, b)).forEach((record) => {
+    const tr = document.createElement("tr");
+    if (state.editingRecordId === record.id) {
+      tr.className = "editing-row";
+      tr.innerHTML = renderSummaryEditableRecordRow(record);
+    } else {
+      tr.innerHTML = renderSummaryReadOnlyRecordRow(record);
+    }
+    tbody.appendChild(tr);
+  });
+
+  tbody.onclick = (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    if (button.dataset.summaryEdit) {
+      state.editingRecordId = button.dataset.summaryEdit;
+      renderSummary();
+    }
+    if (button.dataset.summarySave) saveRecordFromRow(button.dataset.summarySave, button.closest("tr"));
+    if (button.dataset.summaryCancel) {
+      state.editingRecordId = null;
+      renderSummary();
+    }
+  };
+}
+
+function renderSummaryReadOnlyRecordRow(record) {
+  return `
+    <td>${escapeHtml(record.date)}</td>
+    <td>${escapeHtml(record.store)}</td>
+    <td>${escapeHtml(record.machine)}</td>
+    <td>${escapeHtml(record.unit)}</td>
+    <td>${Number(record.games || 0).toLocaleString()}</td>
+    <td>${record.bb}/${record.rb}</td>
+    <td>${rateText(record.totalRate)}</td>
+    <td>${formatDiff(record.diff)}</td>
+    <td>${ratingPill(record.rating)}</td>
+    <td class="memo-cell">${escapeHtml(record.memo || "")}</td>
+    <td class="row-actions"><button class="secondary" data-summary-edit="${record.id}" type="button">編集</button></td>
+  `;
+}
+
+function renderSummaryEditableRecordRow(record) {
+  return `
+    <td><input type="date" data-edit-field="date" value="${escapeHtml(record.date)}"></td>
+    <td><input data-edit-field="store" value="${escapeHtml(record.store)}"></td>
+    <td><input data-edit-field="machine" value="${escapeHtml(record.machine)}"></td>
+    <td><input data-edit-field="unit" value="${escapeHtml(record.unit)}"></td>
+    <td><input type="number" inputmode="numeric" data-edit-field="games" value="${Number(record.games || 0)}"></td>
+    <td class="inline-pair">
+      <input type="number" inputmode="numeric" data-edit-field="bb" aria-label="BB" value="${Number(record.bb || 0)}">
+      <input type="number" inputmode="numeric" data-edit-field="rb" aria-label="RB" value="${Number(record.rb || 0)}">
+    </td>
+    <td>${rateText(record.totalRate)}</td>
+    <td><input type="number" inputmode="numeric" data-edit-field="diff" value="${Number(record.diff || 0)}"></td>
+    <td>${ratingPill(record.rating)}</td>
+    <td><textarea data-edit-field="memo" rows="3">${escapeHtml(record.memo || "")}</textarea></td>
+    <td class="row-actions">
+      <button class="secondary" data-summary-save="${record.id}" type="button">保存</button>
+      <button data-summary-cancel="${record.id}" type="button">キャンセル</button>
+    </td>
+  `;
+}
+
+function bulkUpdateSummaryMemoTags(mode) {
+  const tags = getSelectedMemoTags("#summaryBulkMemoTags");
+  if (!tags.length) {
+    alert("一括操作するメモタグを選択してください。");
+    return;
+  }
+  updateMemoTagsForRecords(specialFilteredRecords(), tags, mode, "現在の集計対象");
+}
+
+function openRecordsWithSummaryFilters() {
+  const records = specialFilteredRecords();
+  const filters = getSummaryFilters();
+  state.recordsScopeIds = new Set(records.map((record) => record.id));
+  state.suppressRecordFilterClear = true;
+  setSelectValue("#filterStore", filters.store);
+  renderFilterOptions();
+  setSelectValue("#filterMachine", filters.machine);
+  renderFilterOptions();
+  setSelectValue("#filterUnit", filters.unit);
+  setSelectValue("#filterMemoTag", filters.memoTag);
+  setSelectValue("#filterRating", filters.rating);
+  $("#filterPositive").checked = filters.positive;
+  $("#filterAOnly").checked = filters.aOnly;
+  $("#filterDate").value = filters.from && filters.from === filters.to ? filters.from : "";
+  renderFilterOptions();
+  ["#filterStoreText", "#filterMachineText", "#filterUnitText"].forEach((selector) => {
+    const input = $(selector);
+    if (input) input.value = "";
+  });
+  state.suppressRecordFilterClear = false;
+  $(".tab-button[data-tab='records']").click();
+  renderRecords();
+}
+
+function setSelectValue(selector, value) {
+  const select = $(selector);
+  if (!select) return;
+  select.value = [...select.options].some((option) => option.value === value) ? value : "";
 }
 
 function calculateStats(records) {
@@ -3607,15 +3800,17 @@ function bulkUpdateMemoTags(mode) {
     alert("一括操作するメモタグを選択してください。");
     return;
   }
+  updateMemoTagsForRecords(getFilteredRecords(), tags, mode, "検索結果");
+}
 
-  const targets = getFilteredRecords();
+function updateMemoTagsForRecords(targets, tags, mode, targetLabel) {
   if (!targets.length) {
-    alert("検索結果が0件のため、一括操作できません。");
+    alert(`${targetLabel}が0件のため、一括操作できません。`);
     return;
   }
 
   const verb = mode === "add" ? "追加" : "削除";
-  if (!confirm(`検索結果 ${targets.length}件にタグ「${tags.join("、")}」を${verb}します。よろしいですか？`)) return;
+  if (!confirm(`${targetLabel} ${targets.length}件にタグ「${tags.join("、")}」を${verb}します。よろしいですか？`)) return;
 
   const targetIds = new Set(targets.map((record) => record.id));
   let changedCount = 0;
@@ -3634,6 +3829,26 @@ function bulkUpdateMemoTags(mode) {
   saveJson(STORAGE_KEYS.records, state.records);
   renderAll();
   alert(`タグ${verb}完了：${changedCount}件`);
+}
+
+
+function renderSummaryFilterOptions() {
+  if (!$("#specialStore")) return;
+  const filters = getSummaryFilters();
+  const dateFiltered = state.records.filter((record) => matchesSummaryDateFilters(record, filters));
+  const stores = unique(dateFiltered.map((record) => record.store));
+  const selectedStore = stores.includes(filters.store) ? filters.store : "";
+  const machines = unique(dateFiltered
+    .filter((record) => !selectedStore || record.store === selectedStore)
+    .map((record) => record.machine));
+  const selectedMachine = machines.includes(filters.machine) ? filters.machine : "";
+  const units = uniqueUnits(dateFiltered
+    .filter((record) => (!selectedStore || record.store === selectedStore) && (!selectedMachine || record.machine === selectedMachine))
+    .map((record) => record.unit));
+
+  renderSelectOptions("#specialStore", stores, "すべて");
+  renderSelectOptions("#specialMachine", machines, "すべて");
+  renderSelectOptions("#specialUnit", units, "すべて");
 }
 
 function renderAll() {
@@ -3657,7 +3872,9 @@ function renderOptions() {
   renderMemoTagSelect("#memoTagSelect", memoTags, "保存済みタグを選択");
   renderMemoTagSelect("#filterMemoTag", memoTags, "すべて");
   renderMemoTagSelect("#bulkMemoTags", memoTags);
+  renderSummaryFilterOptions();
   renderMemoTagSelect("#specialMemoTag", memoTags, "すべて");
+  renderMemoTagSelect("#summaryBulkMemoTags", memoTags);
   renderMemoTagSelect("#recommendMemoTags", memoTags);
 }
 
