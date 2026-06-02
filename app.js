@@ -443,7 +443,8 @@ async function readGraphImages() {
     applyGraphResultsToDraftRows(allResults);
     renderGraphResults(allResults);
     const reflected = allResults.filter((result) => result.applied).length;
-    updateUploadStatus(`${files.length}枚のグラフ画像から${allResults.length}件を読み取り、${reflected}件を入力表へ反映しました。黄色の最大獲得枚数は差枚として使用していません。`);
+    const needsReview = allResults.filter((result) => !isUsableGraphDiffResult(result)).length;
+    updateUploadStatus(`${allResults.length}件中${reflected}件を反映、${needsReview}件は要確認です。要確認台は手入力してください。`);
   } catch (error) {
     console.error(error);
     updateUploadStatus("グラフ差枚の読み取り中にエラーが発生しました。画像を確認して再実行してください。");
@@ -461,24 +462,62 @@ async function recognizeGraphDiffImage(file, imageNumber) {
 
   for (const [index, region] of regions.entries()) {
     const label = `${imageNumber} グラフ${index + 1}/${regions.length}`;
-    updateUploadStatus(`台番号をOCR中です（${label}）...`);
-    const unitResult = await recognizeGraphUnitNumber(source, region, label);
-    updateUploadStatus(`黄色ライン終点から差枚を推定中です（${label}）...`);
-    const diffResult = analyzeGraphDiff(source, region);
-    results.push({
-      ...diffResult,
-      unit: unitResult.unit,
-      unitConfidence: unitResult.confidence,
-      unitText: unitResult.text,
-      region,
-      imageNumber,
-      graphIndex: index + 1,
-      sourceCanvas: source,
-      applied: false,
-      skipped: false
-    });
+    let unitResult = { unit: "", confidence: 0, text: "" };
+    try {
+      updateUploadStatus(`台番号をOCR中です（${label}）...`);
+      unitResult = await recognizeGraphUnitNumber(source, region, label);
+      updateUploadStatus(`黄色ライン終点から差枚を推定中です（${label}）...`);
+      const diffResult = analyzeGraphDiff(source, region);
+      results.push({
+        ...diffResult,
+        unit: unitResult.unit,
+        unitConfidence: unitResult.confidence,
+        unitText: unitResult.text,
+        region,
+        imageNumber,
+        graphIndex: index + 1,
+        sourceCanvas: source,
+        applied: false,
+        skipped: false
+      });
+    } catch (error) {
+      console.error(`グラフ読み取りエラー（${label}）:`, error?.message || error, error);
+      results.push(createGraphReadErrorResult({
+        unitResult,
+        region,
+        imageNumber,
+        graphIndex: index + 1,
+        sourceCanvas: source
+      }));
+    }
   }
   return results;
+}
+
+function createGraphReadErrorResult({ unitResult, region, imageNumber, graphIndex, sourceCanvas }) {
+  return {
+    diff: null,
+    zeroLineY: null,
+    endpoint: null,
+    endpointSide: null,
+    yellowCount: 0,
+    yellowTextBlocks: [],
+    yellowComponents: [],
+    lineComponents: [],
+    adoptedLineComponent: null,
+    adoptedLineSegment: null,
+    warnings: ["読み取りエラー"],
+    status: "要確認: グラフ読み取りエラー",
+    unit: unitResult?.unit || "",
+    unitConfidence: unitResult?.confidence || 0,
+    unitText: unitResult?.text || "",
+    region,
+    imageNumber,
+    graphIndex,
+    sourceCanvas,
+    applied: false,
+    skipped: false
+  };
 }
 
 function detectGraphRegions(canvas) {
@@ -1032,25 +1071,28 @@ function detectZeroLineY(imageData) {
 }
 
 function detectYellowEndpoint(lineMask, lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
+  const safeLineComponents = Array.isArray(lineComponents) ? lineComponents : [];
+  const safeYellowTextBlocks = Array.isArray(yellowTextBlocks) ? yellowTextBlocks : [];
   const warnings = [];
-  const trace = buildYellowLineTrace(lineMask, width, height);
-  const segments = findYellowLineTraceSegments(trace, width, height)
+  const hasLineMask = lineMask && lineMask.length >= width * height;
+  const trace = hasLineMask ? buildYellowLineTrace(lineMask, width, height) : null;
+  const segments = trace ? findYellowLineTraceSegments(trace, width, height)
     .filter((segment) => segment.right >= width * 0.12)
-    .filter((segment) => !segmentEndpointLooksLikeText(segment, yellowTextBlocks, width, height))
-    .sort((a, b) => b.right - a.right || b.validCount - a.validCount);
+    .filter((segment) => !segmentEndpointLooksLikeText(segment, safeYellowTextBlocks, width, height))
+    .sort((a, b) => b.right - a.right || b.validCount - a.validCount) : [];
 
   if (segments.length) {
     const chosenSegment = segments[0];
-    if (segments.length > 1 || hasDiscardedMiddleComponents(lineComponents, chosenSegment)) warnings.push("途中成分除外");
+    if (segments.length > 1 || hasDiscardedMiddleComponents(safeLineComponents, chosenSegment)) warnings.push("途中成分除外");
     if (chosenSegment.right < width * 0.45) warnings.push("短時間稼働推定");
     warnings.push("最右連続区間採用");
     const endpoint = endpointFromTraceSegment(chosenSegment, trace);
-    const component = lineComponents.find((candidate) => candidate.left <= chosenSegment.right && candidate.right >= chosenSegment.left)
+    const component = safeLineComponents.find((candidate) => candidate.left <= chosenSegment.right && candidate.right >= chosenSegment.left)
       || segmentToComponent(chosenSegment, trace);
     return { endpoint, component, segment: chosenSegment, warnings };
   }
 
-  const fallback = detectYellowEndpointFromComponents(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents);
+  const fallback = detectYellowEndpointFromComponents(lineMask, safeLineComponents, width, height, zeroLineY, safeYellowTextBlocks, yellowComponents);
   if (fallback.endpoint && fallback.endpoint.x < width * 0.45) fallback.warnings.push("短時間稼働推定");
   return fallback;
 }
@@ -1179,22 +1221,32 @@ function segmentToComponent(segment, trace) {
   };
 }
 
-function detectYellowEndpointFromComponents(lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
+function detectYellowEndpointFromComponents(lineMask, lineComponents, width, height, zeroLineY, yellowTextBlocks, yellowComponents = []) {
+  const safeLineComponents = Array.isArray(lineComponents) ? lineComponents : [];
+  const safeYellowTextBlocks = Array.isArray(yellowTextBlocks) ? yellowTextBlocks : [];
+  const safeYellowComponents = Array.isArray(yellowComponents) ? yellowComponents : [];
   const warnings = [];
+  const hasLineMask = lineMask && lineMask.length >= width * height;
+  if (!hasLineMask) {
+    warnings.push("ライン要確認");
+    return { endpoint: null, component: null, segment: null, warnings };
+  }
+
   const profile = buildYellowLineProfile(lineMask, width, height);
   const rightmostRun = findRightmostContinuousLineRun(profile);
-  if (rightmostRun?.endpoint && !endpointLooksLikeText(rightmostRun.endpoint, yellowTextBlocks, width, height)) {
+  if (rightmostRun?.endpoint && !endpointLooksLikeText(rightmostRun.endpoint, safeYellowTextBlocks, width, height)) {
     return {
       endpoint: rightmostRun.endpoint,
-      component: findComponentForProfileRun(lineComponents, rightmostRun, width, height),
+      component: findComponentForProfileRun(safeLineComponents, rightmostRun, width, height),
+      segment: null,
       warnings
     };
   }
 
-  const candidates = lineComponents
+  const candidates = safeLineComponents
     .map((component) => ({ component, endpoint: endpointFromLineComponent(component, width) }))
     .filter((candidate) => candidate.endpoint)
-    .filter((candidate) => !endpointLooksLikeText(candidate.endpoint, yellowTextBlocks, width, height))
+    .filter((candidate) => !endpointLooksLikeText(candidate.endpoint, safeYellowTextBlocks, width, height))
     .sort((a, b) => b.endpoint.x - a.endpoint.x || scoreLineEndpointCandidate(b, width) - scoreLineEndpointCandidate(a, width));
 
   if (!candidates.length) return { endpoint: null, component: null, segment: null, warnings };
@@ -1202,14 +1254,14 @@ function detectYellowEndpointFromComponents(lineComponents, width, height, zeroL
   let chosen = candidates[0];
   if (candidates.length > 1) warnings.push("途中成分除外");
   warnings.push("最右連続区間採用");
-  const safeCandidate = candidates.find((candidate) => !isSuspiciousNumberEndpoint(candidate.endpoint, candidate.component, yellowComponents, width, height, yellowTextBlocks));
-  if (safeCandidate && safeCandidate.endpoint.x >= chosen.endpoint.x - Math.max(8, width * 0.03) && isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, yellowComponents, width, height, yellowTextBlocks)) {
+  const safeCandidate = candidates.find((candidate) => !isSuspiciousNumberEndpoint(candidate.endpoint, candidate.component, safeYellowComponents, width, height, safeYellowTextBlocks));
+  if (safeCandidate && safeCandidate.endpoint.x >= chosen.endpoint.x - Math.max(8, width * 0.03) && isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, safeYellowComponents, width, height, safeYellowTextBlocks)) {
     chosen = safeCandidate;
     warnings.push("数字誤認識再探索");
   }
 
-  if (isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, yellowComponents, width, height, yellowTextBlocks)) {
-    const rescannedEndpoint = findContinuousEndpointFromRight(chosen.component, width, height, yellowComponents, yellowTextBlocks);
+  if (isSuspiciousNumberEndpoint(chosen.endpoint, chosen.component, safeYellowComponents, width, height, safeYellowTextBlocks)) {
+    const rescannedEndpoint = findContinuousEndpointFromRight(chosen.component, width, height, safeYellowComponents, safeYellowTextBlocks);
     if (rescannedEndpoint) {
       chosen = { ...chosen, endpoint: rescannedEndpoint };
       warnings.push("右端から再探索");
@@ -1359,24 +1411,37 @@ function cropSourceCanvas(source, rect, options = {}) {
 }
 
 function applyGraphResultsToDraftRows(results) {
-  const usable = results.filter((result) => result.unit && result.diff !== null && !result.warnings.includes("0ライン要確認") && !result.warnings.includes("終点要確認"));
-  if (!usable.length) return;
+  const resultsWithUnit = results.filter((result) => result.unit);
+  if (!resultsWithUnit.length) return;
   if (isDraftTableEmpty()) $("#draftTable tbody").innerHTML = "";
 
-  usable.forEach((result) => {
+  resultsWithUnit.forEach((result) => {
     const row = findDraftRowByUnit(result.unit) || addDraftRowAndReturn({ unit: result.unit });
     const currentDiff = $(".diff", row).value.trim();
-    const memoText = `グラフ推定差枚: ${formatSignedNumber(result.diff)}`;
-    if (!currentDiff) {
-      $(".diff", row).value = result.diff;
-      result.applied = true;
+
+    if (isUsableGraphDiffResult(result)) {
+      const memoText = `グラフ推定差枚: ${formatSignedNumber(result.diff)}`;
+      if (!currentDiff) {
+        $(".diff", row).value = result.diff;
+        result.applied = true;
+      } else {
+        result.skipped = true;
+      }
+      appendRowMemo(row, currentDiff ? `${memoText}（既存差枚あり未上書き）` : memoText);
     } else {
-      result.skipped = true;
+      appendRowMemo(row, "グラフ差枚要確認");
     }
-    appendRowMemo(row, currentDiff ? `${memoText}（既存差枚あり未上書き）` : memoText);
+
     setOcrStatusCell($(".ocr-check", row), result.status, result.unitConfidence || "");
     updateDraftRow(row);
   });
+}
+
+function isUsableGraphDiffResult(result) {
+  return result.diff !== null
+    && !(result.warnings || []).includes("0ライン要確認")
+    && !(result.warnings || []).includes("終点要確認")
+    && !(result.warnings || []).includes("読み取りエラー");
 }
 
 function findDraftRowByUnit(unit) {
@@ -1406,10 +1471,9 @@ function renderGraphResults(results) {
   panel.hidden = false;
   list.innerHTML = results.length ? results.map((result) => {
     const unit = result.unit || "台番号要確認";
-    const diff = result.diff === null ? "差枚要確認" : formatSignedNumber(result.diff);
-    const note = result.diff === null ? result.warnings.join("・") || "要確認" : "グラフ推定";
-    const reflect = result.applied ? "反映済み" : result.skipped ? "既存差枚あり未上書き" : "自動反映なし";
-    return `<div class="graph-result-item"><strong>${escapeHtml(unit)}</strong><span>→ ${escapeHtml(diff)} / ${escapeHtml(note)}<small>${escapeHtml(graphResultDebugText(result))}</small></span><em>${escapeHtml(reflect)}</em></div>`;
+    const summary = isUsableGraphDiffResult(result) ? `${formatSignedNumber(result.diff)}枚 推定` : "要確認";
+    const reflect = result.applied ? "反映済み" : result.skipped ? "既存差枚あり未上書き" : result.unit ? "台番号のみ反映" : "自動反映なし";
+    return `<div class="graph-result-item"><strong>${escapeHtml(unit)}</strong><span>：${escapeHtml(summary)}<small>${escapeHtml(graphResultDebugText(result))}</small></span><em>${escapeHtml(reflect)}</em></div>`;
   }).join("") : '<p class="muted">黒いグラフ領域を検出できませんでした。</p>';
 
   previews.innerHTML = "";
@@ -1422,7 +1486,7 @@ function createGraphPreviewCard(result) {
   const canvas = cropSourceCanvas(result.sourceCanvas, result.region, { padding: 0, fill: "black" });
   drawGraphDebugOverlay(canvas, result);
   const title = document.createElement("strong");
-  title.textContent = `${result.unit || "台番号要確認"} → ${result.diff === null ? "差枚要確認" : formatSignedNumber(result.diff)}`;
+  title.textContent = `${result.unit || "台番号要確認"}：${isUsableGraphDiffResult(result) ? `${formatSignedNumber(result.diff)}枚 推定` : "要確認"}`;
   const detail = document.createElement("p");
   detail.textContent = `${result.warnings.length ? `${result.warnings.join("・")} / ` : ""}${graphResultDebugText(result)}`;
   card.append(title, canvas, detail);
