@@ -26,7 +26,8 @@ const state = {
   memoTags: loadMemoTags(),
   sort: { key: "date", direction: "desc" },
   analysisSelection: null,
-  ocrPreview: { files: [], settings: [], currentIndex: 0, image: null }
+  ocrPreview: { files: [], settings: [], currentIndex: 0, image: null },
+  editingRecordId: null
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -2395,8 +2396,13 @@ function numberValue(value) {
 }
 
 function bindRecords() {
-  ["filterDate", "filterStore", "filterMachine", "filterUnit", "filterRating", "filterMemoTag", "filterPositive", "filterAOnly"].forEach((id) => {
-    $(`#${id}`).addEventListener("input", renderRecords);
+  ["filterDate", "filterStore", "filterMachine", "filterUnit", "filterRating", "filterMemoTag", "filterPositive", "filterAOnly", "filterStoreText", "filterMachineText", "filterUnitText"].forEach((id) => {
+    const element = $(`#${id}`);
+    if (!element) return;
+    element.addEventListener("input", () => {
+      if (["filterDate", "filterStore", "filterMachine"].includes(id)) renderFilterOptions();
+      renderRecords();
+    });
   });
   $("#recordsTable thead").addEventListener("click", (event) => {
     const key = event.target.dataset.sort;
@@ -2409,33 +2415,48 @@ function bindRecords() {
   $("#exportDatedRecordsButton").addEventListener("click", () => exportRecordsCsv(`slot-records_${formatLocalDate(new Date())}.csv`));
   $("#reevaluateRecordsButton").addEventListener("click", reevaluateSavedRecords);
   $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
+  $("#bulkAddTagButton").addEventListener("click", () => bulkUpdateMemoTags("add"));
+  $("#bulkRemoveTagButton").addEventListener("click", () => bulkUpdateMemoTags("remove"));
   $("#deleteAllRecordsButton").addEventListener("click", () => {
     if (!confirm("保存データをすべて削除しますか？")) return;
     state.records = [];
+    state.editingRecordId = null;
     saveJson(STORAGE_KEYS.records, state.records);
     renderAll();
   });
 }
 
+function getRecordFilters() {
+  return {
+    date: $("#filterDate")?.value || "",
+    store: $("#filterStore")?.value || "",
+    machine: $("#filterMachine")?.value || "",
+    unit: $("#filterUnit")?.value || "",
+    storeText: $("#filterStoreText")?.value.trim() || "",
+    machineText: $("#filterMachineText")?.value.trim() || "",
+    unitText: $("#filterUnitText")?.value.trim() || "",
+    rating: $("#filterRating")?.value || "",
+    memoTag: $("#filterMemoTag")?.value || "",
+    positive: Boolean($("#filterPositive")?.checked),
+    aOnly: Boolean($("#filterAOnly")?.checked)
+  };
+}
+
 function getFilteredRecords() {
-  const date = $("#filterDate").value;
-  const store = $("#filterStore").value.trim();
-  const machine = $("#filterMachine").value.trim();
-  const unit = $("#filterUnit").value.trim();
-  const rating = $("#filterRating").value;
-  const memoTag = $("#filterMemoTag").value;
-  const positive = $("#filterPositive").checked;
-  const aOnly = $("#filterAOnly").checked;
+  const filters = getRecordFilters();
 
   return state.records.filter((record) => {
-    if (date && record.date !== date) return false;
-    if (store && !record.store.includes(store)) return false;
-    if (machine && !record.machine.includes(machine)) return false;
-    if (unit && !String(record.unit).includes(unit)) return false;
-    if (rating && record.rating !== rating) return false;
-    if (memoTag && !recordHasMemoTag(record, memoTag)) return false;
-    if (positive && record.diff <= 0) return false;
-    if (aOnly && record.rating !== "A") return false;
+    if (filters.date && record.date !== filters.date) return false;
+    if (filters.store && record.store !== filters.store) return false;
+    if (filters.machine && record.machine !== filters.machine) return false;
+    if (filters.unit && String(record.unit) !== filters.unit) return false;
+    if (filters.storeText && !String(record.store || "").includes(filters.storeText)) return false;
+    if (filters.machineText && !String(record.machine || "").includes(filters.machineText)) return false;
+    if (filters.unitText && !String(record.unit || "").includes(filters.unitText)) return false;
+    if (filters.rating && record.rating !== filters.rating) return false;
+    if (filters.memoTag && !recordHasMemoTag(record, filters.memoTag)) return false;
+    if (filters.positive && record.diff <= 0) return false;
+    if (filters.aOnly && record.rating !== "A") return false;
     return true;
   }).sort((a, b) => compareBySort(a, b));
 }
@@ -2454,46 +2475,138 @@ function renderRecords() {
   tbody.innerHTML = "";
   getFilteredRecords().forEach((record) => {
     const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${escapeHtml(record.date)}</td>
-      <td>${escapeHtml(record.store)}</td>
-      <td>${escapeHtml(record.machine)}</td>
-      <td>${escapeHtml(record.unit)}</td>
-      <td>${record.games}</td>
-      <td>${record.bb}/${record.rb}</td>
-      <td>${rateText(record.totalRate)}</td>
-      <td>${formatDiff(record.diff)}</td>
-      <td>${ratingPill(record.rating)}</td>
-      <td>${escapeHtml(record.reason || "")}</td>
-      <td class="row-actions">
-        <button class="secondary icon" data-edit="${record.id}" type="button">編</button>
-        <button class="danger icon" data-delete="${record.id}" type="button">×</button>
-      </td>
-    `;
+    if (state.editingRecordId === record.id) {
+      tr.className = "editing-row";
+      tr.innerHTML = renderEditableRecordRow(record);
+    } else {
+      tr.innerHTML = renderReadOnlyRecordRow(record);
+    }
     tbody.appendChild(tr);
   });
 
   tbody.onclick = (event) => {
-    const editId = event.target.dataset.edit;
-    const deleteId = event.target.dataset.delete;
-    if (editId) editRecord(editId);
+    const button = event.target.closest("button");
+    if (!button) return;
+    const editId = button.dataset.edit;
+    const saveId = button.dataset.save;
+    const cancelId = button.dataset.cancel;
+    const deleteId = button.dataset.delete;
+    if (editId) startInlineEdit(editId);
+    if (saveId) saveInlineRecord(saveId);
+    if (cancelId) cancelInlineEdit();
     if (deleteId) deleteRecord(deleteId);
   };
 }
 
-function editRecord(id) {
-  const record = state.records.find((item) => item.id === id);
-  if (!record) return;
-  $(".tab-button[data-tab='input']").click();
-  $("#inputDate").value = record.date;
-  $("#storeInput").value = record.store;
-  $("#machineInput").value = record.machine;
-  $("#sessionMemo").value = record.memo || "";
-  $("#draftTable tbody").innerHTML = "";
-  addDraftRow(record);
-  state.records = state.records.filter((item) => item.id !== id);
+function renderReadOnlyRecordRow(record) {
+  return `
+    <td>${escapeHtml(record.date)}</td>
+    <td>${escapeHtml(record.store)}</td>
+    <td>${escapeHtml(record.machine)}</td>
+    <td>${escapeHtml(record.unit)}</td>
+    <td>${Number(record.games || 0).toLocaleString()}</td>
+    <td>${record.bb}/${record.rb}</td>
+    <td>${rateText(record.totalRate)}</td>
+    <td>${formatDiff(record.diff)}</td>
+    <td>${ratingPill(record.rating)}</td>
+    <td class="reason-cell">${escapeHtml(record.reason || "")}</td>
+    <td class="memo-cell">${escapeHtml(record.memo || "")}</td>
+    <td class="row-actions">
+      <button class="secondary" data-edit="${record.id}" type="button" title="一覧上で編集">編集</button>
+      <button class="danger icon" data-delete="${record.id}" type="button" title="削除">×</button>
+    </td>
+  `;
+}
+
+function renderEditableRecordRow(record) {
+  return `
+    <td><input type="date" data-edit-field="date" value="${escapeHtml(record.date)}"></td>
+    <td><input data-edit-field="store" value="${escapeHtml(record.store)}"></td>
+    <td><input data-edit-field="machine" value="${escapeHtml(record.machine)}"></td>
+    <td><input data-edit-field="unit" value="${escapeHtml(record.unit)}"></td>
+    <td><input type="number" inputmode="numeric" data-edit-field="games" value="${Number(record.games || 0)}"></td>
+    <td class="inline-pair">
+      <input type="number" inputmode="numeric" data-edit-field="bb" aria-label="BB" value="${Number(record.bb || 0)}">
+      <input type="number" inputmode="numeric" data-edit-field="rb" aria-label="RB" value="${Number(record.rb || 0)}">
+    </td>
+    <td>${rateText(record.totalRate)}</td>
+    <td><input type="number" inputmode="numeric" data-edit-field="diff" value="${Number(record.diff || 0)}"></td>
+    <td>${ratingPill(record.rating)}</td>
+    <td class="reason-cell">${escapeHtml(record.reason || "")}</td>
+    <td><textarea data-edit-field="memo" rows="3">${escapeHtml(record.memo || "")}</textarea></td>
+    <td class="row-actions">
+      <button class="secondary" data-save="${record.id}" type="button" title="保存">保存</button>
+      <button data-cancel="${record.id}" type="button" title="キャンセル">キャンセル</button>
+    </td>
+  `;
+}
+
+function startInlineEdit(id) {
+  state.editingRecordId = id;
+  renderRecords();
+}
+
+function cancelInlineEdit() {
+  state.editingRecordId = null;
+  renderRecords();
+}
+
+function saveInlineRecord(id) {
+  const row = $(`button[data-save="${cssEscape(id)}"]`)?.closest("tr");
+  const index = state.records.findIndex((item) => item.id === id);
+  if (!row || index === -1) return;
+
+  const original = state.records[index];
+  const updated = {
+    ...original,
+    date: getInlineFieldValue(row, "date"),
+    store: getInlineFieldValue(row, "store").trim(),
+    machine: getInlineFieldValue(row, "machine").trim(),
+    unit: getInlineFieldValue(row, "unit").trim(),
+    games: numberValue(getInlineFieldValue(row, "games")),
+    bb: numberValue(getInlineFieldValue(row, "bb")),
+    rb: numberValue(getInlineFieldValue(row, "rb")),
+    diff: numberValue(getInlineFieldValue(row, "diff")),
+    memo: getInlineFieldValue(row, "memo").trim()
+  };
+
+  if (!updated.date || !updated.store || !updated.machine) {
+    alert("日付、店舗、機種を入力してください。");
+    return;
+  }
+
+  const rates = calculateRates(updated.games, updated.bb, updated.rb);
+  const evaluation = evaluateRecord({ ...updated, ...rates });
+  Object.assign(updated, {
+    bbRate: rates.bb,
+    rbRate: rates.rb,
+    totalRate: rates.total,
+    rating: evaluation.rating || "要確認",
+    expectation: evaluation.expectation || 0,
+    confidence: evaluation.confidence || "低",
+    reason: evaluation.reason || "手動入力データです。",
+    nearestSettings: evaluation.nearestSettings || "-",
+    updatedAt: new Date().toISOString()
+  });
+
+  state.records[index] = updated;
+  saveStoreName(updated.store);
   saveJson(STORAGE_KEYS.records, state.records);
+  state.editingRecordId = null;
   renderAll();
+}
+
+function getInlineFieldValue(row, field) {
+  return $(`[data-edit-field="${field}"]`, row)?.value || "";
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return CSS.escape(value);
+  return String(value).replace(/"/g, '\\"');
+}
+
+function editRecord(id) {
+  startInlineEdit(id);
 }
 
 function deleteRecord(id) {
@@ -3445,6 +3558,84 @@ function reevaluateSavedRecords() {
   alert(`再判定完了：${ratingSummary}\n判定項目更新：${changedCount}件\n${transitionSummary}`);
 }
 
+
+function renderFilterOptions() {
+  const filters = getRecordFilters();
+  const stores = unique(state.records
+    .filter((record) => !filters.date || record.date === filters.date)
+    .map((record) => record.store));
+  const selectedStore = stores.includes(filters.store) ? filters.store : "";
+  const machines = unique(state.records
+    .filter((record) => (!filters.date || record.date === filters.date) && (!selectedStore || record.store === selectedStore))
+    .map((record) => record.machine));
+  const selectedMachine = machines.includes(filters.machine) ? filters.machine : "";
+  const candidates = state.records.filter((record) => {
+    if (filters.date && record.date !== filters.date) return false;
+    if (selectedStore && record.store !== selectedStore) return false;
+    if (selectedMachine && record.machine !== selectedMachine) return false;
+    return true;
+  });
+
+  renderSelectOptions("#filterStore", stores, "すべて");
+  renderSelectOptions("#filterMachine", machines, "すべて");
+  renderSelectOptions("#filterUnit", uniqueUnits(candidates.map((record) => record.unit)), "すべて");
+}
+
+function renderSelectOptions(selector, values, emptyLabel = "すべて") {
+  const select = $(selector);
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = `<option value="">${escapeHtml(emptyLabel)}</option>${values.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+  select.value = values.includes(current) ? current : "";
+}
+
+function uniqueUnits(units) {
+  return [...new Set(units.map((unit) => String(unit || "").trim()).filter(Boolean))]
+    .sort((a, b) => {
+      const an = Number(normalizeNumberText(a));
+      const bn = Number(normalizeNumberText(b));
+      if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn;
+      if (Number.isFinite(an) && !Number.isFinite(bn)) return -1;
+      if (!Number.isFinite(an) && Number.isFinite(bn)) return 1;
+      return a.localeCompare(b, "ja");
+    });
+}
+
+function bulkUpdateMemoTags(mode) {
+  const tags = getSelectedMemoTags("#bulkMemoTags");
+  if (!tags.length) {
+    alert("一括操作するメモタグを選択してください。");
+    return;
+  }
+
+  const targets = getFilteredRecords();
+  if (!targets.length) {
+    alert("検索結果が0件のため、一括操作できません。");
+    return;
+  }
+
+  const verb = mode === "add" ? "追加" : "削除";
+  if (!confirm(`検索結果 ${targets.length}件にタグ「${tags.join("、")}」を${verb}します。よろしいですか？`)) return;
+
+  const targetIds = new Set(targets.map((record) => record.id));
+  let changedCount = 0;
+  state.records = state.records.map((record) => {
+    if (!targetIds.has(record.id)) return record;
+    const currentParts = splitMemoParts(record.memo);
+    const nextParts = mode === "add"
+      ? [...currentParts, ...tags.filter((tag) => !currentParts.includes(tag))]
+      : currentParts.filter((part) => !tags.includes(part));
+    const nextMemo = nextParts.join(" / ");
+    if (nextMemo === String(record.memo || "")) return record;
+    changedCount += 1;
+    return { ...record, memo: nextMemo, updatedAt: new Date().toISOString() };
+  });
+
+  saveJson(STORAGE_KEYS.records, state.records);
+  renderAll();
+  alert(`タグ${verb}完了：${changedCount}件`);
+}
+
 function renderAll() {
   renderOptions();
   renderRecords();
@@ -3462,8 +3653,10 @@ function renderOptions() {
   $("#storeList").innerHTML = stores.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
   $("#storeSelect").innerHTML = `<option value="">店舗を選択</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
   $("#machineList").innerHTML = machines.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+  renderFilterOptions();
   renderMemoTagSelect("#memoTagSelect", memoTags, "保存済みタグを選択");
   renderMemoTagSelect("#filterMemoTag", memoTags, "すべて");
+  renderMemoTagSelect("#bulkMemoTags", memoTags);
   renderMemoTagSelect("#specialMemoTag", memoTags, "すべて");
   renderMemoTagSelect("#recommendMemoTags", memoTags);
 }
