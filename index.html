@@ -183,9 +183,21 @@
 
       <div class="filter-grid">
         <label>日付<input type="date" id="filterDate"></label>
-        <label>店舗<input id="filterStore" placeholder="店舗で検索"></label>
-        <label>機種<input id="filterMachine" placeholder="機種で検索"></label>
-        <label>台番号<input id="filterUnit" placeholder="台番号"></label>
+        <label>店舗
+          <select id="filterStore">
+            <option value="">すべて</option>
+          </select>
+        </label>
+        <label>機種
+          <select id="filterMachine">
+            <option value="">すべて</option>
+          </select>
+        </label>
+        <label>台番号
+          <select id="filterUnit">
+            <option value="">すべて</option>
+          </select>
+        </label>
         <label>評価
           <select id="filterRating">
             <option value="">すべて</option>
@@ -204,6 +216,26 @@
         <label class="check"><input type="checkbox" id="filterAOnly"> A評価のみ</label>
       </div>
 
+      <details class="advanced-search">
+        <summary>詳細検索（文字入力）</summary>
+        <div class="filter-grid">
+          <label>店舗名を含む<input id="filterStoreText" placeholder="店舗名の一部"></label>
+          <label>機種名を含む<input id="filterMachineText" placeholder="機種名の一部"></label>
+          <label>台番号を含む<input id="filterUnitText" placeholder="台番号の一部"></label>
+        </div>
+      </details>
+
+      <div class="bulk-tag-panel">
+        <label>検索結果に一括操作するメモタグ
+          <select id="bulkMemoTags" multiple size="4" aria-label="一括操作するメモタグ"></select>
+        </label>
+        <div class="action-row">
+          <button class="secondary" id="bulkAddTagButton" type="button">検索結果にタグ追加</button>
+          <button class="danger subtle" id="bulkRemoveTagButton" type="button">検索結果からタグ削除</button>
+        </div>
+        <p class="muted">現在の検索結果すべてが対象です。既存メモは上書きせず、タグは「 / 」区切りで追加・削除します。</p>
+      </div>
+
       <div class="action-row">
         <button id="exportLatestRecordsButton" type="button">最新版CSV出力</button>
         <button class="secondary" id="exportDatedRecordsButton" type="button">日付付きCSV出力</button>
@@ -211,7 +243,7 @@
         <label class="file-button">CSV取込<input type="file" id="importRecordsInput" accept=".csv,text/csv"></label>
         <button class="danger subtle" id="deleteAllRecordsButton" type="button">全削除</button>
       </div>
-      <p class="csv-export-note">スマホのブラウザによっては、同名ファイルでも自動上書きされず、(1) 付きで保存される場合があります。再判定前にCSVバックアップをおすすめします。</p>
+      <p class="csv-export-note">一覧上で直接編集できます。編集前・一括タグ操作前には、万一に備えてCSVバックアップ（最新版CSV出力）をおすすめします。スマホのブラウザによっては、同名ファイルでも自動上書きされず、(1) 付きで保存される場合があります。</p>
 
       <div class="table-wrap">
         <table class="data-table compact" id="recordsTable">
@@ -227,6 +259,7 @@
               <th data-sort="diff">差枚</th>
               <th data-sort="rating">評価</th>
               <th>理由</th>
+              <th>メモ</th>
               <th></th>
             </tr>
           </thead>
@@ -248,6 +281,10 @@
             <option value="store">店舗別</option>
             <option value="machine">機種別</option>
             <option value="unit">台番号別</option>
+            <option value="memoTag">メモタグ別</option>
+            <option value="weekday">曜日別</option>
+            <option value="monthDay">毎月の日付別</option>
+            <option value="unitRange">番号帯別</option>
           </select>
         </label>
         <label>開始日<input type="date" id="specialFrom"></label>
@@ -265,18 +302,77 @@
             <option value="6">土</option>
           </select>
         </label>
+        <label>店舗
+          <select id="specialStore">
+            <option value="">すべて</option>
+          </select>
+        </label>
+        <label>機種
+          <select id="specialMachine">
+            <option value="">すべて</option>
+          </select>
+        </label>
+        <label>台番号
+          <select id="specialUnit">
+            <option value="">すべて</option>
+          </select>
+        </label>
         <label>メモタグ
           <select id="specialMemoTag">
             <option value="">すべて</option>
           </select>
         </label>
+        <label>評価
+          <select id="specialRating">
+            <option value="">すべて</option>
+            <option value="A">A</option>
+            <option value="B">B</option>
+            <option value="C">C</option>
+            <option value="要確認">要確認</option>
+          </select>
+        </label>
         <label class="check"><input type="checkbox" id="specialDouble"> ゾロ目日</label>
+        <label class="check"><input type="checkbox" id="specialPositive"> 差枚プラスのみ</label>
+        <label class="check"><input type="checkbox" id="specialAOnly"> A評価のみ</label>
+      </div>
+
+      <div class="bulk-tag-panel">
+        <label>集計対象に一括操作するメモタグ
+          <select id="summaryBulkMemoTags" multiple size="4" aria-label="集計対象に一括操作するメモタグ"></select>
+        </label>
+        <div class="action-row">
+          <button class="secondary" id="summaryBulkAddTagButton" type="button">集計対象にタグ追加</button>
+          <button class="danger subtle" id="summaryBulkRemoveTagButton" type="button">集計対象からタグ削除</button>
+          <button id="openRecordsWithSummaryFiltersButton" type="button">この条件で一覧を開く</button>
+        </div>
+        <p class="muted">現在の集計条件に一致するデータが対象です。既存メモは上書きせず、タグは「 / 」区切りで追加・削除します。</p>
       </div>
 
       <div class="summary-banner" id="specialSummary">条件を指定すると対象件数を表示します。</div>
       <div class="summary-grid" id="summaryCards"></div>
       <h3 class="subhead">高評価台ランキング</h3>
       <div class="ranking-list" id="summaryRanking"></div>
+      <h3 class="subhead">対象データ一覧</h3>
+      <div class="table-wrap">
+        <table class="data-table compact" id="summaryRecordsTable">
+          <thead>
+            <tr>
+              <th>日付</th>
+              <th>店舗</th>
+              <th>機種</th>
+              <th>台番号</th>
+              <th>累計G</th>
+              <th>BB/RB</th>
+              <th>合算</th>
+              <th>差枚</th>
+              <th>評価</th>
+              <th>メモ</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </section>
 
 

@@ -882,3 +882,45 @@ button:disabled {
     grid-column: 1 / -1;
   }
 }
+
+.advanced-search,
+.bulk-tag-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  padding: 12px;
+}
+
+.advanced-search summary {
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.advanced-search .filter-grid,
+.bulk-tag-panel .action-row {
+  margin-bottom: 0;
+  margin-top: 12px;
+}
+
+.memo-cell,
+.reason-cell {
+  max-width: 260px;
+  white-space: pre-wrap;
+}
+
+.inline-pair {
+  display: grid;
+  gap: 6px;
+  min-width: 92px;
+}
+
+.editing-row td {
+  background: #fbf8ed;
+}
+
+.editing-row textarea {
+  min-width: 220px;
+}
