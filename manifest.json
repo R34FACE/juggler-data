@@ -1,0 +1,19 @@
+{
+  "name": "スロット台データ管理",
+  "short_name": "台データ管理",
+  "description": "ジャグラーなどのスロット台データを保存・集計・分析する管理アプリ",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6faf6",
+  "theme_color": "#008b76",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
