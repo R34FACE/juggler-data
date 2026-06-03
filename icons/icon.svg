@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="112" fill="#008b76"/>
+  <circle cx="256" cy="180" r="82" fill="#ffffff" opacity="0.95"/>
+  <text x="256" y="205" text-anchor="middle" font-size="96" font-family="Arial, sans-serif" font-weight="700" fill="#008b76">台</text>
+  <rect x="104" y="300" width="304" height="42" rx="21" fill="#ffffff" opacity="0.95"/>
+  <rect x="136" y="368" width="240" height="32" rx="16" fill="#ffffff" opacity="0.8"/>
+</svg>
