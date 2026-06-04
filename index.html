@@ -3,21 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>スロット台データ管理</title>
-  <link rel="manifest" href="manifest.json">
+  <title>ジャグラーデータ管理</title>
+  <link rel="manifest" href="manifest.json?v=10">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="台データ管理">
+  <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=10">
 </head>
 <body>
   <header class="app-header">
     <div>
       <p class="eyebrow">Slot Data Manager</p>
-      <h1>スロット台データ管理</h1>
+      <h1>ジャグラーデータ管理</h1>
     </div>
     <div class="storage-chip" id="storageStatus">保存 0件</div>
   </header>
@@ -60,9 +60,14 @@
             <button class="danger subtle" id="deleteStoreButton" type="button">削除</button>
           </div>
         </label>
-        <label>
+        <label class="machine-field">
           機種
-          <input id="machineInput" list="machineList" placeholder="例：マイジャグラー5" required>
+          <div class="store-entry">
+            <input id="machineInput" list="machineList" placeholder="例：マイジャグラー5" required>
+            <select id="machineSelect">
+              <option value="">機種を選択</option>
+            </select>
+          </div>
           <datalist id="machineList"></datalist>
         </label>
         <label class="wide">
@@ -93,7 +98,7 @@
         <label class="upload-box">
           <span>基本データ画像</span>
           <input type="file" id="basicImage" accept="image/*" multiple>
-          <small>アップロード後に表範囲を確認し、5列固定・指定行数でセルOCRします。</small>
+          <small>通常スクショは範囲指定、表だけに切り抜いた画像は画像全体を自動検出してOCRできます。</small>
         </label>
         <label class="upload-box">
           <span>グラフ画像</span>
@@ -104,41 +109,53 @@
 
       <section class="ocr-preview-panel" id="ocrPreviewPanel" hidden>
         <div class="section-head compact-head">
-          <h3>基本データOCR範囲</h3>
-          <p>薄い罫線でもズレにくいよう、表の外枠と行数を指定してから読み取ります。列は「台番 / 累計ゲーム / BB / RB / 合算」に固定分割されます。</p>
+          <h3>基本データOCRモード</h3>
+          <p>通常スクショは範囲を指定し、表だけ画像は画像全体から行・列を自動検出して読み取ります。列は「台番 / 累計ゲーム / BB / RB / 合算」に固定です。</p>
         </div>
         <div class="ocr-preview-layout">
           <div class="ocr-canvas-wrap">
-            <canvas id="ocrPreviewCanvas" aria-label="OCR範囲プレビュー"></canvas>
+            <canvas id="ocrPreviewCanvas" aria-label="OCR画像プレビュー"></canvas>
           </div>
           <div class="ocr-controls">
-            <label>調整する画像
-              <select id="ocrPreviewFileSelect"></select>
-            </label>
-            <label>行数
-              <input type="number" id="ocrRowCount" min="1" max="60" value="19">
-            </label>
-            <label>上端 <span id="ocrTopValue">8%</span>
-              <input type="range" id="ocrTop" min="0" max="95" value="8">
-            </label>
-            <label>下端 <span id="ocrBottomValue">96%</span>
-              <input type="range" id="ocrBottom" min="5" max="100" value="96">
-            </label>
-            <label>左端 <span id="ocrLeftValue">3%</span>
-              <input type="range" id="ocrLeft" min="0" max="95" value="3">
-            </label>
-            <label>右端 <span id="ocrRightValue">97%</span>
-              <input type="range" id="ocrRight" min="5" max="100" value="97">
-            </label>
-            <p class="muted">画像ごとに範囲と行数を変更できます。プレビューの緑枠内を5列×指定行数に固定分割して数字専用OCRします。</p>
+            <fieldset class="ocr-mode-field">
+              <legend>読み取りモード</legend>
+              <label><input type="radio" name="ocrMode" value="tableOnly" checked> 表だけ画像モード（画像全体を自動検出）</label>
+              <label><input type="radio" name="ocrMode" value="range"> 通常モード（範囲指定あり）</label>
+            </fieldset>
+            <div class="table-only-hint" id="tableOnlyHint">
+              <strong>表だけ画像モードで読み取ります。</strong>
+              <p>表だけに切り抜いた画像はそのままOCRできます。範囲指定や行数入力は不要です。画像全体を自動解析します。</p>
+            </div>
+            <div class="manual-ocr-controls" id="manualOcrControls" hidden>
+              <label>調整する画像
+                <select id="ocrPreviewFileSelect"></select>
+              </label>
+              <div class="ocr-range-controls" id="ocrRangeControls">
+                <label class="manual-ocr-row-count">行数
+                  <input type="number" id="ocrRowCount" min="1" max="60" value="19">
+                </label>
+                <label>上端 <span id="ocrTopValue">8%</span>
+                  <input type="range" id="ocrTop" min="0" max="95" value="8">
+                </label>
+                <label>下端 <span id="ocrBottomValue">96%</span>
+                  <input type="range" id="ocrBottom" min="5" max="100" value="96">
+                </label>
+                <label>左端 <span id="ocrLeftValue">3%</span>
+                  <input type="range" id="ocrLeft" min="0" max="95" value="3">
+                </label>
+                <label>右端 <span id="ocrRightValue">97%</span>
+                  <input type="range" id="ocrRight" min="5" max="100" value="97">
+                </label>
+              </div>
+            </div>
+            <p class="muted" id="ocrModeHelp">表だけ画像モードでは、画像全体を自動解析して5列固定でOCRします。</p>
           </div>
         </div>
       </section>
 
       <div class="action-row">
-        <button class="secondary" id="readBasicImagesButton" type="button">指定範囲をOCR読み取り</button>
+        <button class="secondary" id="readBasicImagesButton" type="button">基本データをOCR読み取り</button>
         <button class="secondary" id="readGraphImagesButton" type="button">グラフ差枚を読み取り</button>
-        <button class="secondary" id="mockReadButton" type="button">読み取り枠を追加</button>
         <button id="addRowButton" type="button">台を追加</button>
         <button class="danger subtle" id="clearDraftButton" type="button">入力をクリア</button>
       </div>
@@ -541,6 +558,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

@@ -563,6 +563,16 @@ main {
   min-width: 72px;
 }
 
+.machine-field .store-entry {
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 220px);
+}
+
+@media (max-width: 720px) {
+  .machine-field .store-entry {
+    grid-template-columns: 1fr;
+  }
+}
+
 .upload-status {
   background: #fff;
   border: 1px solid var(--line);
@@ -617,9 +627,69 @@ button:disabled {
   max-width: 100%;
 }
 
-.ocr-controls {
+
+[hidden] {
+  display: none !important;
+}
+
+.manual-ocr-controls[hidden],
+.ocr-range-controls[hidden],
+.table-only-hint[hidden] {
+  display: none !important;
+}
+
+.ocr-table-only-mode .manual-ocr-controls {
+  display: none !important;
+}
+
+.ocr-range-mode .manual-ocr-controls {
+  display: grid;
+}
+
+.ocr-controls,
+.manual-ocr-controls,
+.ocr-range-controls {
   display: grid;
   gap: 10px;
+}
+
+.table-only-hint {
+  background: #eef7f3;
+  border: 1px solid #c9e5d8;
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 12px;
+}
+
+.table-only-hint p {
+  color: var(--muted);
+  margin: 6px 0 0;
+}
+
+.ocr-mode-field {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+}
+
+.ocr-mode-field legend {
+  color: var(--muted);
+  font-size: 0.88rem;
+  padding: 0 4px;
+}
+
+.ocr-mode-field label {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+}
+
+.ocr-mode-field input {
+  width: auto;
 }
 
 .ocr-controls input[type="range"] {
