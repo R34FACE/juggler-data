@@ -618,9 +618,23 @@ button:disabled {
 }
 
 .ocr-controls,
+.manual-ocr-controls,
 .ocr-range-controls {
   display: grid;
   gap: 10px;
+}
+
+.table-only-hint {
+  background: #eef7f3;
+  border: 1px solid #c9e5d8;
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px 12px;
+}
+
+.table-only-hint p {
+  color: var(--muted);
+  margin: 6px 0 0;
 }
 
 .ocr-mode-field {

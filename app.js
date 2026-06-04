@@ -26,7 +26,7 @@ const state = {
   memoTags: loadMemoTags(),
   sort: { key: "date", direction: "desc" },
   analysisSelection: null,
-  ocrPreview: { files: [], settings: [], currentIndex: 0, image: null, mode: "range" },
+  ocrPreview: { files: [], settings: [], currentIndex: 0, image: null, mode: "tableOnly" },
   editingRecordId: null,
   recordsScopeIds: null,
   suppressRecordFilterClear: false
@@ -251,12 +251,25 @@ function updateOcrModeControls() {
   const mode = getSelectedOcrMode();
   state.ocrPreview.mode = mode;
   const isTableOnly = mode === "tableOnly";
-  if ($("#ocrRangeControls")) $("#ocrRangeControls").hidden = isTableOnly;
+  $$(".manual-ocr-controls").forEach((element) => {
+    element.hidden = isTableOnly;
+  });
+  $$(".table-only-hint").forEach((element) => {
+    element.hidden = !isTableOnly;
+  });
   if ($("#ocrModeHelp")) {
     $("#ocrModeHelp").textContent = isTableOnly
-      ? "表だけ画像モードでは上端・下端・左端・右端・行数を使わず、画像全体から罫線と文字位置を検出して5列固定でOCRします。"
+      ? "表だけ画像モードでは、画像全体を自動解析して5列固定でOCRします。範囲指定や行数入力は使いません。"
       : "通常モードでは画像ごとに範囲と行数を変更できます。プレビューの緑枠内を5列×指定行数に固定分割して数字専用OCRします。";
   }
+}
+
+function selectOcrMode(mode) {
+  const normalizedMode = mode === "range" ? "range" : "tableOnly";
+  const input = $(`input[name="ocrMode"][value="${normalizedMode}"]`);
+  if (input) input.checked = true;
+  state.ocrPreview.mode = normalizedMode;
+  updateOcrModeControls();
 }
 
 function updateUploadStatus(message) {
@@ -271,6 +284,7 @@ async function handleBasicImagesSelected() {
   state.ocrPreview.files = files;
   state.ocrPreview.settings = files.map(() => defaultOcrRangeSettings());
   state.ocrPreview.currentIndex = 0;
+  if (files.length) selectOcrMode("tableOnly");
   $("#ocrPreviewPanel").hidden = !files.length;
   $("#ocrPreviewFileSelect").innerHTML = files.map((file, index) => `<option value="${index}">${index + 1}. ${escapeHtml(file.name)}</option>`).join("");
   if (files.length) await selectOcrPreviewImage(0);
@@ -360,9 +374,9 @@ function renderOcrPreview() {
 
   const settings = getOcrRangeSettings(state.ocrPreview.currentIndex);
   updateOcrRangeLabels(settings);
-  const tableOnly = getSelectedOcrMode() === "tableOnly";
-  const rect = tableOnly ? { left: 0, top: 0, width: canvas.width, height: canvas.height } : settingsToCanvasRect(settings, canvas.width, canvas.height);
-  const previewRows = tableOnly ? Math.max(2, Math.min(20, Math.round(canvas.height / 52))) : settings.rows;
+  if (getSelectedOcrMode() === "tableOnly") return;
+
+  const rect = settingsToCanvasRect(settings, canvas.width, canvas.height);
   ctx.save();
   ctx.fillStyle = tableOnly ? "rgba(53, 111, 197, 0.10)" : "rgba(34, 125, 104, 0.12)";
   ctx.strokeStyle = tableOnly ? "#356fc5" : "#1b8f72";
