@@ -1537,6 +1537,40 @@ function renderGraphResults(results) {
   results.forEach((result) => previews.appendChild(createGraphPreviewCard(result)));
 }
 
+
+function clearGraphResults() {
+  const panel = $("#graphResultPanel");
+  const list = $("#graphResultList");
+  const previews = $("#graphPreviewGrid");
+
+  if (panel) panel.hidden = true;
+  if (list) list.innerHTML = "";
+  if (previews) previews.innerHTML = "";
+
+  const graphInput = $("#graphImage");
+  if (graphInput) graphInput.value = "";
+}
+
+function clearBasicOcrState() {
+  const basicInput = $("#basicImage");
+  if (basicInput) basicInput.value = "";
+
+  state.ocrPreview.files = [];
+  state.ocrPreview.settings = [];
+  state.ocrPreview.currentIndex = 0;
+  state.ocrPreview.image = null;
+  state.ocrPreview.mode = "tableOnly";
+
+  const previewPanel = $("#ocrPreviewPanel");
+  if (previewPanel) previewPanel.hidden = true;
+
+  const fileSelect = $("#ocrPreviewFileSelect");
+  if (fileSelect) fileSelect.innerHTML = "";
+
+  selectOcrMode("tableOnly");
+  renderOcrPreview();
+}
+
 function createGraphPreviewCard(result) {
   const card = document.createElement("article");
   card.className = "graph-preview-card";
@@ -2577,6 +2611,9 @@ function saveDraftRows() {
   $("#draftTable tbody").innerHTML = "";
   addDraftRow();
   $("#sessionMemo").value = "";
+  clearGraphResults();
+  clearBasicOcrState();
+  updateUploadStatus();
   renderAll();
   alert(`${rows.length}台を保存しました。`);
 }
