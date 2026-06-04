@@ -251,6 +251,8 @@ function updateOcrModeControls() {
   const mode = getSelectedOcrMode();
   state.ocrPreview.mode = mode;
   const isTableOnly = mode === "tableOnly";
+  document.body.classList.toggle("ocr-table-only-mode", isTableOnly);
+  document.body.classList.toggle("ocr-range-mode", !isTableOnly);
   $$(".manual-ocr-controls").forEach((element) => {
     element.hidden = isTableOnly;
   });

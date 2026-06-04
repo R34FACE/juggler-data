@@ -617,6 +617,25 @@ button:disabled {
   max-width: 100%;
 }
 
+
+[hidden] {
+  display: none !important;
+}
+
+.manual-ocr-controls[hidden],
+.ocr-range-controls[hidden],
+.table-only-hint[hidden] {
+  display: none !important;
+}
+
+.ocr-table-only-mode .manual-ocr-controls {
+  display: none !important;
+}
+
+.ocr-range-mode .manual-ocr-controls {
+  display: grid;
+}
+
 .ocr-controls,
 .manual-ocr-controls,
 .ocr-range-controls {
