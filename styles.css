@@ -563,6 +563,16 @@ main {
   min-width: 72px;
 }
 
+.machine-field .store-entry {
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 220px);
+}
+
+@media (max-width: 720px) {
+  .machine-field .store-entry {
+    grid-template-columns: 1fr;
+  }
+}
+
 .upload-status {
   background: #fff;
   border: 1px solid var(--line);

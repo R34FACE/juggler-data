@@ -99,7 +99,16 @@ function bindTabs() {
 function bindDraftTable() {
   $("#addRowButton").addEventListener("click", () => addDraftRow());
   $("#mockReadButton").addEventListener("click", () => addDraftRow({ memo: "画像読み取り後に修正" }));
-  $("#machineInput").addEventListener("input", refreshDraftEvaluations);
+  $("#machineInput").addEventListener("input", () => {
+    syncMachineSelectToInput();
+    refreshDraftEvaluations();
+  });
+  $("#machineSelect").addEventListener("change", () => {
+    const value = $("#machineSelect").value;
+    if (!value) return;
+    $("#machineInput").value = value;
+    refreshDraftEvaluations();
+  });
   $("#clearDraftButton").addEventListener("click", () => {
     $("#draftTable tbody").innerHTML = "";
     addDraftRow();
@@ -4174,12 +4183,20 @@ function renderAll() {
 
 function renderOptions() {
   const stores = unique(state.stores);
-  const machines = unique([...state.records.map((record) => record.machine), ...state.masters.map((master) => master.name)]);
+  const machines = unique([
+    ...state.records.map((record) => String(record.machine || "").trim()),
+    ...state.masters.map((master) => String(master.name || "").trim())
+  ]);
   const memoTags = normalizeMemoTags(state.memoTags);
   state.memoTags = memoTags;
   $("#storeList").innerHTML = stores.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
   $("#storeSelect").innerHTML = `<option value="">店舗を選択</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
   $("#machineList").innerHTML = machines.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+  const machineSelect = $("#machineSelect");
+  if (machineSelect) {
+    machineSelect.innerHTML = `<option value="">機種を選択</option>${machines.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+    syncMachineSelectToInput();
+  }
   renderFilterOptions();
   renderMemoTagSelect("#memoTagSelect", memoTags, "保存済みタグを選択");
   renderMemoTagSelect("#filterMemoTag", memoTags, "すべて");
@@ -4188,6 +4205,15 @@ function renderOptions() {
   renderMemoTagSelect("#specialMemoTag", memoTags, "すべて");
   renderMemoTagSelect("#summaryBulkMemoTags", memoTags);
   renderMemoTagSelect("#recommendMemoTags", memoTags);
+}
+
+
+function syncMachineSelectToInput() {
+  const machineSelect = $("#machineSelect");
+  const machineInput = $("#machineInput");
+  if (!machineSelect || !machineInput) return;
+  const value = machineInput.value.trim();
+  machineSelect.value = value && [...machineSelect.options].some((option) => option.value === value) ? value : "";
 }
 
 function renderMemoTagSelect(selector, tags, emptyLabel) {

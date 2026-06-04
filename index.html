@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ジャグラーデータ管理</title>
-  <link rel="manifest" href="manifest.json?v=8">
+  <link rel="manifest" href="manifest.json?v=9">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css?v=8">
+  <link rel="stylesheet" href="styles.css?v=9">
 </head>
 <body>
   <header class="app-header">
@@ -60,9 +60,14 @@
             <button class="danger subtle" id="deleteStoreButton" type="button">削除</button>
           </div>
         </label>
-        <label>
+        <label class="machine-field">
           機種
-          <input id="machineInput" list="machineList" placeholder="例：マイジャグラー5" required>
+          <div class="store-entry">
+            <input id="machineInput" list="machineList" placeholder="例：マイジャグラー5" required>
+            <select id="machineSelect">
+              <option value="">機種を選択</option>
+            </select>
+          </div>
           <datalist id="machineList"></datalist>
         </label>
         <label class="wide">
@@ -554,6 +559,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>
