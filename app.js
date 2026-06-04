@@ -378,12 +378,12 @@ function renderOcrPreview() {
 
   const rect = settingsToCanvasRect(settings, canvas.width, canvas.height);
   ctx.save();
-  ctx.fillStyle = "rgba(34, 125, 104, 0.12)";
-  ctx.strokeStyle = "#1b8f72";
+  ctx.fillStyle = tableOnly ? "rgba(53, 111, 197, 0.10)" : "rgba(34, 125, 104, 0.12)";
+  ctx.strokeStyle = tableOnly ? "#356fc5" : "#1b8f72";
   ctx.lineWidth = 2;
   ctx.fillRect(rect.left, rect.top, rect.width, rect.height);
   ctx.strokeRect(rect.left, rect.top, rect.width, rect.height);
-  ctx.strokeStyle = "rgba(27, 143, 114, 0.72)";
+  ctx.strokeStyle = tableOnly ? "rgba(53, 111, 197, 0.62)" : "rgba(27, 143, 114, 0.72)";
   ctx.lineWidth = 1;
   for (let col = 1; col < 5; col += 1) {
     const x = rect.left + (rect.width * col) / 5;
@@ -392,8 +392,8 @@ function renderOcrPreview() {
     ctx.lineTo(x, rect.top + rect.height);
     ctx.stroke();
   }
-  for (let row = 1; row < settings.rows; row += 1) {
-    const y = rect.top + (rect.height * row) / settings.rows;
+  for (let row = 1; row < previewRows; row += 1) {
+    const y = rect.top + (rect.height * row) / previewRows;
     ctx.beginPath();
     ctx.moveTo(rect.left, y);
     ctx.lineTo(rect.left + rect.width, y);
