@@ -1,7 +1,7 @@
 {
-  "name": "スロット台データ管理",
-  "short_name": "台データ管理",
-  "description": "ジャグラーなどのスロット台データを保存・集計・分析する管理アプリ",
+  "name": "ジャグラーデータ管理",
+  "short_name": "ジャグラー管理",
+  "description": "ジャグラーの台データを保存・集計・分析する管理アプリ",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
