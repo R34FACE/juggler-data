@@ -98,7 +98,6 @@ function bindTabs() {
 
 function bindDraftTable() {
   $("#addRowButton").addEventListener("click", () => addDraftRow());
-  $("#mockReadButton").addEventListener("click", () => addDraftRow({ memo: "画像読み取り後に修正" }));
   $("#machineInput").addEventListener("input", () => {
     syncMachineSelectToInput();
     refreshDraftEvaluations();
