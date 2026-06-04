@@ -26,7 +26,7 @@ const state = {
   memoTags: loadMemoTags(),
   sort: { key: "date", direction: "desc" },
   analysisSelection: null,
-  ocrPreview: { files: [], settings: [], currentIndex: 0, image: null },
+  ocrPreview: { files: [], settings: [], currentIndex: 0, image: null, mode: "tableOnly" },
   editingRecordId: null,
   recordsScopeIds: null,
   suppressRecordFilterClear: false
@@ -99,7 +99,16 @@ function bindTabs() {
 function bindDraftTable() {
   $("#addRowButton").addEventListener("click", () => addDraftRow());
   $("#mockReadButton").addEventListener("click", () => addDraftRow({ memo: "画像読み取り後に修正" }));
-  $("#machineInput").addEventListener("input", refreshDraftEvaluations);
+  $("#machineInput").addEventListener("input", () => {
+    syncMachineSelectToInput();
+    refreshDraftEvaluations();
+  });
+  $("#machineSelect").addEventListener("change", () => {
+    const value = $("#machineSelect").value;
+    if (!value) return;
+    $("#machineInput").value = value;
+    refreshDraftEvaluations();
+  });
   $("#clearDraftButton").addEventListener("click", () => {
     $("#draftTable tbody").innerHTML = "";
     addDraftRow();
@@ -232,7 +241,46 @@ function bindImageUploads() {
       renderOcrPreview();
     });
   });
+  $$('input[name="ocrMode"]').forEach((input) => {
+    input.addEventListener("change", () => {
+      state.ocrPreview.mode = getSelectedOcrMode();
+      updateOcrModeControls();
+      renderOcrPreview();
+    });
+  });
+  updateOcrModeControls();
   updateUploadStatus();
+}
+
+function getSelectedOcrMode() {
+  return $('input[name="ocrMode"]:checked')?.value === "tableOnly" ? "tableOnly" : "range";
+}
+
+function updateOcrModeControls() {
+  const mode = getSelectedOcrMode();
+  state.ocrPreview.mode = mode;
+  const isTableOnly = mode === "tableOnly";
+  document.body.classList.toggle("ocr-table-only-mode", isTableOnly);
+  document.body.classList.toggle("ocr-range-mode", !isTableOnly);
+  $$(".manual-ocr-controls").forEach((element) => {
+    element.hidden = isTableOnly;
+  });
+  $$(".table-only-hint").forEach((element) => {
+    element.hidden = !isTableOnly;
+  });
+  if ($("#ocrModeHelp")) {
+    $("#ocrModeHelp").textContent = isTableOnly
+      ? "表だけ画像モードでは、画像全体を自動解析して5列固定でOCRします。範囲指定や行数入力は使いません。"
+      : "通常モードでは画像ごとに範囲と行数を変更できます。プレビューの緑枠内を5列×指定行数に固定分割して数字専用OCRします。";
+  }
+}
+
+function selectOcrMode(mode) {
+  const normalizedMode = mode === "range" ? "range" : "tableOnly";
+  const input = $(`input[name="ocrMode"][value="${normalizedMode}"]`);
+  if (input) input.checked = true;
+  state.ocrPreview.mode = normalizedMode;
+  updateOcrModeControls();
 }
 
 function updateUploadStatus(message) {
@@ -247,6 +295,7 @@ async function handleBasicImagesSelected() {
   state.ocrPreview.files = files;
   state.ocrPreview.settings = files.map(() => defaultOcrRangeSettings());
   state.ocrPreview.currentIndex = 0;
+  if (files.length) selectOcrMode("tableOnly");
   $("#ocrPreviewPanel").hidden = !files.length;
   $("#ocrPreviewFileSelect").innerHTML = files.map((file, index) => `<option value="${index}">${index + 1}. ${escapeHtml(file.name)}</option>`).join("");
   if (files.length) await selectOcrPreviewImage(0);
@@ -336,6 +385,8 @@ function renderOcrPreview() {
 
   const settings = getOcrRangeSettings(state.ocrPreview.currentIndex);
   updateOcrRangeLabels(settings);
+  if (getSelectedOcrMode() === "tableOnly") return;
+
   const rect = settingsToCanvasRect(settings, canvas.width, canvas.height);
   ctx.save();
   ctx.fillStyle = "rgba(34, 125, 104, 0.12)";
@@ -387,26 +438,41 @@ async function readBasicImages() {
 
   const button = $("#readBasicImagesButton");
   button.disabled = true;
+  const mode = getSelectedOcrMode();
+  const tableOnlyMode = mode === "tableOnly";
   let added = 0;
   try {
-    saveCurrentOcrSettingsFromControls();
-    updateUploadStatus("指定した表範囲をOCR読み取り中です...");
+    if (!tableOnlyMode) saveCurrentOcrSettingsFromControls();
+    updateUploadStatus(tableOnlyMode ? "表だけ画像を自動OCR読み取り中です..." : "指定した表範囲をOCR読み取り中です...");
     for (const [index, file] of files.entries()) {
       const imageNumber = `${index + 1}/${files.length}枚目`;
-      const settings = getOcrRangeSettings(index);
-      updateUploadStatus(`指定範囲を5列×${settings.rows}行に分割中です（${imageNumber}）...`);
-      let rows = await recognizeBasicDataTableImage(file, imageNumber, settings);
-      if (!rows.length) {
-        updateUploadStatus(`表分割で抽出できなかったため、従来OCRへ切り替えます（${imageNumber}）...`);
-        const ocrResults = await recognizeBasicDataImage(file, imageNumber);
-        rows = parseBasicDataText(ocrResults.map((result) => result.text).join("\n"));
+      let rows = [];
+      if (tableOnlyMode) {
+        updateUploadStatus(`画像全体から行・列を自動検出中です（${imageNumber}）...`);
+        rows = await recognizeBasicDataTableOnlyImage(file, imageNumber);
+      } else {
+        const settings = getOcrRangeSettings(index);
+        updateUploadStatus(`指定範囲を5列×${settings.rows}行に分割中です（${imageNumber}）...`);
+        rows = await recognizeBasicDataTableImage(file, imageNumber, settings);
+        if (!rows.length) {
+          updateUploadStatus(`表分割で抽出できなかったため、従来OCRへ切り替えます（${imageNumber}）...`);
+          const ocrResults = await recognizeBasicDataImage(file, imageNumber);
+          rows = parseBasicDataText(ocrResults.map((result) => result.text).join("\n"));
+        }
       }
       if (rows.length && added === 0 && isDraftTableEmpty()) $("#draftTable tbody").innerHTML = "";
       rows.forEach((row) => addDraftRow(row));
       added += rows.length;
     }
     if (added) {
-      updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。指定範囲を5列固定で読み取り、合算はBB+RBから再計算しています。要確認の行は保存前に修正してください。`);
+      if (tableOnlyMode) {
+        const fewRowsMessage = added < 3 ? " 抽出件数が少ないため範囲指定モードも試してください。" : "";
+        updateUploadStatus(`表だけ画像モードで${added}台を読み取りました。合算は保存時にBB+RBから再計算します。${fewRowsMessage}要確認の行は保存前に修正してください。`);
+      } else {
+        updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。指定範囲を5列固定で読み取り、合算はBB+RBから再計算しています。要確認の行は保存前に修正してください。`);
+      }
+    } else if (tableOnlyMode) {
+      updateUploadStatus("表だけ画像として読み取りましたが、抽出件数が少ないため範囲指定モードも試してください。手動入力も利用できます。");
     } else {
       updateUploadStatus("OCRは完了しましたが、台番・累計G・BB・RBを抽出できませんでした。プレビューで表の外枠・行数を調整して再実行するか、手動入力してください。");
     }
@@ -1480,6 +1546,40 @@ function renderGraphResults(results) {
   results.forEach((result) => previews.appendChild(createGraphPreviewCard(result)));
 }
 
+
+function clearGraphResults() {
+  const panel = $("#graphResultPanel");
+  const list = $("#graphResultList");
+  const previews = $("#graphPreviewGrid");
+
+  if (panel) panel.hidden = true;
+  if (list) list.innerHTML = "";
+  if (previews) previews.innerHTML = "";
+
+  const graphInput = $("#graphImage");
+  if (graphInput) graphInput.value = "";
+}
+
+function clearBasicOcrState() {
+  const basicInput = $("#basicImage");
+  if (basicInput) basicInput.value = "";
+
+  state.ocrPreview.files = [];
+  state.ocrPreview.settings = [];
+  state.ocrPreview.currentIndex = 0;
+  state.ocrPreview.image = null;
+  state.ocrPreview.mode = "tableOnly";
+
+  const previewPanel = $("#ocrPreviewPanel");
+  if (previewPanel) previewPanel.hidden = true;
+
+  const fileSelect = $("#ocrPreviewFileSelect");
+  if (fileSelect) fileSelect.innerHTML = "";
+
+  selectOcrMode("tableOnly");
+  renderOcrPreview();
+}
+
 function createGraphPreviewCard(result) {
   const card = document.createElement("article");
   card.className = "graph-preview-card";
@@ -1583,6 +1683,82 @@ async function recognizeBasicDataTableImage(file, imageNumber, settings) {
   return dedupeOcrRows(rows);
 }
 
+async function recognizeBasicDataTableOnlyImage(file, imageNumber) {
+  updateUploadStatus(`表だけ画像の全体を補正中です（${imageNumber}）...`);
+  const bitmap = await loadImageBitmap(file);
+  const source = drawScaledImage(bitmap, { scale: 2.8 });
+  const rawTableCanvas = cropWholeTableCanvas(source, { enhance: false });
+  const tableCanvas = cropWholeTableCanvas(source);
+  const layout = detectTableLayout(tableCanvas, { fullImageBounds: true, columnCount: 5 });
+  const rows = [];
+
+  for (const [rowIndex, rowCells] of layout.rows.entries()) {
+    const header = rowIndex === 0 ? await detectHeaderOnlyRow(rawTableCanvas, rowCells, imageNumber) : false;
+    if (header) continue;
+    updateUploadStatus(`表だけ画像セルを数字専用OCRで読み取り中です（${imageNumber} / ${rowIndex + 1}/${layout.rows.length}行）...`);
+    const cellResults = await Promise.all(rowCells.map((cell, columnIndex) => {
+      const label = `${imageNumber} 自動行${rowIndex + 1} 列${columnIndex + 1}`;
+      return columnIndex === 0 ? recognizeUnitCell(rawTableCanvas, cell, label) : recognizeNumericCell(tableCanvas, cell, label);
+    }));
+    const row = buildOcrRowFromCells(cellResults, rowIndex);
+    if (row) {
+      row.memo = `${row.memo} / 表だけ画像モード`;
+      rows.push(row);
+    }
+  }
+
+  return dedupeOcrRows(rows);
+}
+
+function cropWholeTableCanvas(source, options = {}) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.width;
+  canvas.height = source.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, 0, 0);
+  if (options.enhance === false) return canvas;
+  return enhanceCanvas(canvas, { contrast: 1.85, brightness: 12, threshold: 176, invert: false });
+}
+
+async function detectHeaderOnlyRow(source, rowCells, imageNumber) {
+  const rowRect = {
+    left: Math.min(...rowCells.map((cell) => cell.left)),
+    right: Math.max(...rowCells.map((cell) => cell.right)),
+    top: Math.min(...rowCells.map((cell) => cell.top)),
+    bottom: Math.max(...rowCells.map((cell) => cell.bottom))
+  };
+  const headerCanvas = cropHeaderRowCanvas(source, rowRect);
+  try {
+    const result = await Tesseract.recognize(headerCanvas, "jpn+eng", {
+      tessedit_pageseg_mode: "7",
+      user_defined_dpi: "300",
+      logger: (progress) => {
+        if (progress.status === "recognizing text") updateUploadStatus(`表ヘッダーを確認中です（${imageNumber} ${Math.round(progress.progress * 100)}%）...`);
+      }
+    });
+    const text = normalizeOcrText(result.data.text);
+    return /台\s*(?:番|番号)|累計|総\s*G|BB|RB|合算|合成/i.test(text);
+  } catch (error) {
+    console.warn("Header OCR failed", error);
+    return false;
+  }
+}
+
+function cropHeaderRowCanvas(source, rect) {
+  const width = Math.max(1, rect.right - rect.left + 1);
+  const height = Math.max(1, rect.bottom - rect.top + 1);
+  const canvas = document.createElement("canvas");
+  canvas.width = width + 16;
+  canvas.height = height + 16;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(source, rect.left, rect.top, width, height, 8, 8, width, height);
+  return enhanceCanvas(canvas, { contrast: 1.45, brightness: 8, threshold: null, invert: false });
+}
+
 function cropTableRangeCanvas(source, settings, options = {}) {
   const rect = settingsToCanvasRect(settings, source.width, source.height);
   const canvas = document.createElement("canvas");
@@ -1611,16 +1787,23 @@ function buildFixedGridCells(canvas, rowCount, columnCount) {
   return cells;
 }
 
-function detectTableLayout(canvas) {
+function detectTableLayout(canvas, options = {}) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const darkMap = makeDarkMap(imageData, 120);
-  const bounds = findContentBounds(darkMap, canvas.width, canvas.height);
+  const contentBounds = findContentBounds(darkMap, canvas.width, canvas.height);
+  const bounds = options.fullImageBounds
+    ? padRect({ left: 2, right: canvas.width - 3, top: 2, bottom: canvas.height - 3 }, 0, canvas.width, canvas.height)
+    : contentBounds;
   const horizontalLines = findProjectionLines(darkMap, canvas.width, canvas.height, "horizontal", bounds, 0.42);
   const verticalLines = findProjectionLines(darkMap, canvas.width, canvas.height, "vertical", bounds, 0.32);
-  const rowBands = makeBandsFromLines(horizontalLines, bounds.top, bounds.bottom, 26).filter((band) => band.bottom - band.top >= 18);
-  const columnBands = makeColumnBands(verticalLines, bounds);
-  const dataRows = dropHeaderLikeBand(rowBands, columnBands, darkMap, canvas.width);
+  const lineRowBands = makeBandsFromLines(horizontalLines, bounds.top, bounds.bottom, 26).filter((band) => band.bottom - band.top >= 18);
+  const textRowBands = estimateTextRowBands(darkMap, canvas.width, canvas.height, bounds);
+  const rowBands = horizontalLines.length >= 2 && lineRowBands.length >= Math.max(2, textRowBands.length * 0.6)
+    ? lineRowBands
+    : textRowBands.length >= 2 ? textRowBands : lineRowBands;
+  const columnBands = makeColumnBands(verticalLines, bounds, options.columnCount || 5);
+  const dataRows = options.fullImageBounds ? rowBands : dropHeaderLikeBand(rowBands, columnBands, darkMap, canvas.width);
 
   return {
     bounds,
@@ -1712,20 +1895,20 @@ function makeBandsFromLines(lines, min, max, minSize) {
   return splitEvenly(min, max, Math.max(2, Math.round((max - min) / 68))).map(([top, bottom]) => ({ top, bottom }));
 }
 
-function makeColumnBands(verticalLines, bounds) {
+function makeColumnBands(verticalLines, bounds, columnCount = 5) {
   const detected = makeBandsFromLines(verticalLines, bounds.left, bounds.right, 22)
     .filter((band) => band.bottom - band.top >= 22)
     .map((band) => ({ left: band.top, right: band.bottom }));
-  if (detected.length >= 5) return chooseTargetColumns(detected, bounds);
-  return splitEvenly(bounds.left, bounds.right, 5).map(([left, right]) => ({ left, right }));
+  if (detected.length >= columnCount) return chooseTargetColumns(detected, bounds, columnCount);
+  return splitEvenly(bounds.left, bounds.right, columnCount).map(([left, right]) => ({ left, right }));
 }
 
-function chooseTargetColumns(columns, bounds) {
-  if (columns.length === 5) return columns;
+function chooseTargetColumns(columns, bounds, columnCount = 5) {
+  if (columns.length === columnCount) return columns;
   const widths = columns.map((column) => column.right - column.left);
   const medianWidth = [...widths].sort((a, b) => a - b)[Math.floor(widths.length / 2)] || 1;
   const candidates = columns.filter((column) => column.right - column.left >= medianWidth * 0.45);
-  return candidates.length >= 5 ? candidates.slice(0, 5) : splitEvenly(bounds.left, bounds.right, 5).map(([left, right]) => ({ left, right }));
+  return candidates.length >= columnCount ? candidates.slice(0, columnCount) : splitEvenly(bounds.left, bounds.right, columnCount).map(([left, right]) => ({ left, right }));
 }
 
 function dropHeaderLikeBand(rowBands, columnBands, darkMap, width) {
@@ -1738,6 +1921,39 @@ function dropHeaderLikeBand(rowBands, columnBands, darkMap, width) {
     bottom: first.bottom
   }), 0) / Math.max(1, columnBands.reduce((total, column) => total + (column.right - column.left + 1) * (first.bottom - first.top + 1), 0));
   return digitDensity > 0.23 ? rowBands : rest;
+}
+
+function estimateTextRowBands(darkMap, width, height, bounds) {
+  const counts = Array(height).fill(0);
+  const span = Math.max(1, bounds.right - bounds.left + 1);
+  for (let y = bounds.top; y <= bounds.bottom; y += 1) {
+    for (let x = bounds.left; x <= bounds.right; x += 1) counts[y] += darkMap[y * width + x];
+  }
+  const textThreshold = Math.max(3, span * 0.018);
+  const lineThreshold = Math.max(8, span * 0.42);
+  const bands = [];
+  let start = null;
+  for (let y = bounds.top; y <= bounds.bottom; y += 1) {
+    const hasText = counts[y] >= textThreshold && counts[y] < lineThreshold;
+    if (hasText && start === null) start = y;
+    if ((!hasText || y === bounds.bottom) && start !== null) {
+      const end = hasText && y === bounds.bottom ? y : y - 1;
+      if (end - start >= 5) bands.push({ top: start, bottom: end });
+      start = null;
+    }
+  }
+  return mergeCloseBands(bands, 14)
+    .map((band) => padRect({ left: bounds.left, right: bounds.right, top: band.top, bottom: band.bottom }, 10, width, height))
+    .filter((band) => band.bottom - band.top >= 18);
+}
+
+function mergeCloseBands(bands, gap) {
+  return bands.reduce((merged, band) => {
+    const previous = merged.at(-1);
+    if (previous && band.top - previous.bottom <= gap) previous.bottom = band.bottom;
+    else merged.push({ ...band });
+    return merged;
+  }, []);
 }
 
 function countDarkPixels(darkMap, width, rect) {
@@ -2404,6 +2620,9 @@ function saveDraftRows() {
   $("#draftTable tbody").innerHTML = "";
   addDraftRow();
   $("#sessionMemo").value = "";
+  clearGraphResults();
+  clearBasicOcrState();
+  updateUploadStatus();
   renderAll();
   alert(`${rows.length}台を保存しました。`);
 }
@@ -3964,12 +4183,20 @@ function renderAll() {
 
 function renderOptions() {
   const stores = unique(state.stores);
-  const machines = unique([...state.records.map((record) => record.machine), ...state.masters.map((master) => master.name)]);
+  const machines = unique([
+    ...state.records.map((record) => String(record.machine || "").trim()),
+    ...state.masters.map((master) => String(master.name || "").trim())
+  ]);
   const memoTags = normalizeMemoTags(state.memoTags);
   state.memoTags = memoTags;
   $("#storeList").innerHTML = stores.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
   $("#storeSelect").innerHTML = `<option value="">店舗を選択</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
   $("#machineList").innerHTML = machines.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+  const machineSelect = $("#machineSelect");
+  if (machineSelect) {
+    machineSelect.innerHTML = `<option value="">機種を選択</option>${machines.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+    syncMachineSelectToInput();
+  }
   renderFilterOptions();
   renderMemoTagSelect("#memoTagSelect", memoTags, "保存済みタグを選択");
   renderMemoTagSelect("#filterMemoTag", memoTags, "すべて");
@@ -3978,6 +4205,15 @@ function renderOptions() {
   renderMemoTagSelect("#specialMemoTag", memoTags, "すべて");
   renderMemoTagSelect("#summaryBulkMemoTags", memoTags);
   renderMemoTagSelect("#recommendMemoTags", memoTags);
+}
+
+
+function syncMachineSelectToInput() {
+  const machineSelect = $("#machineSelect");
+  const machineInput = $("#machineInput");
+  if (!machineSelect || !machineInput) return;
+  const value = machineInput.value.trim();
+  machineSelect.value = value && [...machineSelect.options].some((option) => option.value === value) ? value : "";
 }
 
 function renderMemoTagSelect(selector, tags, emptyLabel) {
