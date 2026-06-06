@@ -3215,6 +3215,7 @@ function bindAnalysis() {
     element.addEventListener("input", handler);
     element.addEventListener("change", handler);
   });
+  $("#exportAnalysisCsvButton")?.addEventListener("click", exportAnalysisCsv);
   $("#unitHeatmap").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-unit-key]");
     if (!button) return;
@@ -3495,6 +3496,7 @@ function bindRecommendations() {
     element.addEventListener("change", renderRecommendations);
   });
   $("#makeRecommendButton").addEventListener("click", renderRecommendations);
+  $("#exportRecommendCsvButton")?.addEventListener("click", exportRecommendCsv);
   $("#makeChappyConsultButton")?.addEventListener("click", makeChappyConsultText);
   $("#copyChappyConsultButton")?.addEventListener("click", copyChappyConsultText);
 }
@@ -4474,6 +4476,154 @@ function formatLocalDate(date) {
   return `${year}-${month}-${day}`;
 }
 
+
+function getAnalysisFilterContext() {
+  const store = $("#analysisStore")?.value || "";
+  const machine = $("#analysisMachine")?.value || "";
+  const from = $("#analysisFrom")?.value || "";
+  const to = $("#analysisTo")?.value || "";
+  const rangeMode = $("#analysisRangeMode")?.value || "10";
+  const customRanges = $("#analysisCustomRanges")?.value || "";
+  return { store, machine, from, to, rangeMode, customRanges };
+}
+
+function analysisCsvHeaders() {
+  return [
+    "type", "date", "store", "machine", "unit", "rangeLabel", "label", "count", "avgGames", "avgDiff",
+    "positiveRate", "avgBbRate", "avgRbRate", "avgTotalRate", "aCount", "bCount", "cCount", "score", "reason", "concern", "memo"
+  ];
+}
+
+function buildAnalysisCsvRows(records) {
+  const rows = [analysisCsvHeaders()];
+  const filters = getAnalysisFilterContext();
+  const stats = calculateStats(records);
+  const dates = records.map((record) => record.date).filter(Boolean).sort();
+  const filterMemo = [
+    filters.store ? `店舗:${filters.store}` : "店舗:全店舗",
+    filters.machine ? `機種:${filters.machine}` : "機種:全機種",
+    filters.from ? `開始日:${filters.from}` : "開始日:未指定",
+    filters.to ? `終了日:${filters.to}` : "終了日:未指定",
+    analysisRangeSummary(),
+    filters.rangeMode === "custom" && filters.customRanges ? `任意範囲:${filters.customRanges}` : ""
+  ].filter(Boolean).join(" / ");
+
+  rows.push(["kpi", `${dates[0] || ""}〜${dates[dates.length - 1] || ""}`, filters.store || "全店舗", filters.machine || "全機種", "", "", "対象データ", stats.count, stats.avgGames, stats.avgDiff, stats.positiveRate, stats.avgBbRate, stats.avgRbRate, stats.avgTotalRate, stats.aCount, stats.bCount, stats.cCount, "", "", "", filterMemo]);
+  rows.push(["kpi", "", filters.store || "全店舗", filters.machine || "全機種", "", "", "A評価率", stats.count, "", "", percentage(stats.aCount, stats.count), "", "", "", stats.aCount, stats.bCount, stats.cCount, "", "", "", filterMemo]);
+
+  Object.values(groupBy(records, unitGroupKey)).map(buildUnitStats).sort(compareUnitStats).forEach((item) => {
+    rows.push(["unit_heatmap", "", item.store, item.machine, item.unit, "", `${item.unit}番`, item.count, item.avgGames, item.avgDiff, item.positiveRate, item.avgBbRate, item.avgRbRate, item.avgTotalRate, item.aCount, item.bCount, item.cCount, "", `直近 ${formatDiff(item.latestDiff)} / 直近3回 ${formatDiff(item.recent3Diff)}`, "", ""]);
+  });
+
+  buildUnitRanges(records).forEach(({ label, items }) => {
+    const rangeStats = calculateStats(items);
+    rows.push(["range_analysis", "", filters.store || "全店舗", filters.machine || "全機種", "", label, label, rangeStats.count, rangeStats.avgGames, rangeStats.avgDiff, rangeStats.positiveRate, rangeStats.avgBbRate, rangeStats.avgRbRate, rangeStats.avgTotalRate, rangeStats.aCount, rangeStats.bCount, rangeStats.cCount, "", "", "", analysisRangeSummary()]);
+  });
+
+  Array.from({ length: 31 }, (_, index) => index + 1).forEach((day) => {
+    const items = records.filter((record) => recordDate(record).getDate() === day);
+    if (!items.length) return;
+    const dayStats = calculateStats(items);
+    rows.push(["day_of_month", "", filters.store || "全店舗", filters.machine || "全機種", "", "", `${day}日`, dayStats.count, dayStats.avgGames, dayStats.avgDiff, dayStats.positiveRate, dayStats.avgBbRate, dayStats.avgRbRate, dayStats.avgTotalRate, dayStats.aCount, dayStats.bCount, dayStats.cCount, "", "", "", ""]);
+  });
+
+  ["日", "月", "火", "水", "木", "金", "土"].forEach((label, index) => {
+    const items = records.filter((record) => recordDate(record).getDay() === index);
+    if (!items.length) return;
+    const weekdayStats = calculateStats(items);
+    rows.push(["weekday", "", filters.store || "全店舗", filters.machine || "全機種", "", "", `${label}曜日`, weekdayStats.count, weekdayStats.avgGames, weekdayStats.avgDiff, weekdayStats.positiveRate, weekdayStats.avgBbRate, weekdayStats.avgRbRate, weekdayStats.avgTotalRate, weekdayStats.aCount, weekdayStats.bCount, weekdayStats.cCount, "", "", "", ""]);
+  });
+
+  [["ゾロ目日", true], ["通常日", false]].forEach(([label, double]) => {
+    const items = records.filter((record) => isDoubleDay(recordDate(record)) === double);
+    if (!items.length) return;
+    const doubleStats = calculateStats(items);
+    rows.push(["double_day", "", filters.store || "全店舗", filters.machine || "全機種", "", "", label, doubleStats.count, doubleStats.avgGames, doubleStats.avgDiff, doubleStats.positiveRate, doubleStats.avgBbRate, doubleStats.avgRbRate, doubleStats.avgTotalRate, doubleStats.aCount, doubleStats.bCount, doubleStats.cCount, "", "", "", ""]);
+  });
+
+  const ranges = buildUnitRanges(records);
+  const rangeByUnit = new Map();
+  ranges.forEach(({ label, items }) => items.forEach((record) => rangeByUnit.set(unitGroupKey(record), { label, stats: calculateStats(items) })));
+  Object.values(groupBy(records, unitGroupKey))
+    .map((items) => buildAimCandidate(items, rangeByUnit.get(unitGroupKey(items[0]))))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10)
+    .forEach((item, index) => {
+      rows.push(["ranking", item.latest.date, item.latest.store, item.latest.machine, item.latest.unit, item.rangeLabel || "", `${index + 1}位`, "", "", item.latest.diff, "", item.latest.bbRate, item.latest.rbRate, item.latest.totalRate, "", "", "", item.score, item.reasons.join("＋") || "履歴少なめ", "", item.latest.memo || ""]);
+    });
+
+  const grouped = groupBy(records, unitGroupKey);
+  const selected = state.analysisSelection && grouped[state.analysisSelection]
+    ? state.analysisSelection
+    : Object.keys(grouped).sort((a, b) => compareUnitStats(buildUnitStats(grouped[a]), buildUnitStats(grouped[b])))[0];
+  (selected ? grouped[selected] : []).slice().sort((a, b) => b.date.localeCompare(a.date)).forEach((record) => {
+    rows.push(["unit_history", record.date, record.store, record.machine, record.unit, "", record.rating || "要確認", "", record.games, record.diff, record.diff > 0 ? 100 : 0, record.bbRate, record.rbRate, record.totalRate, record.rating === "A" ? 1 : 0, record.rating === "B" ? 1 : 0, record.rating === "C" ? 1 : 0, "", record.reason || "", "", record.memo || ""]);
+  });
+
+  return rows;
+}
+
+function exportAnalysisCsv() {
+  const records = getAnalysisRecords();
+  const filename = buildExportFilename("juggler-analysis", getAnalysisFilterContext(), "");
+  exportCsv(filename, toCsv(buildAnalysisCsvRows(records)));
+}
+
+function recommendCsvHeaders() {
+  return ["予想日", "店舗", "機種", "特定日タイプ", "メモタグ", "順位", "台番号", "おすすめ度", "スコア", "平均差枚", "平均RB確率", "平均合算", "プラス率", "直近3回差枚", "データ件数", "信頼度", "理由", "不安材料", "メモ"];
+}
+
+function buildRecommendCsvRows(data) {
+  const targetDate = data.targetDate || dateToInputValue(data.target);
+  const specialType = specialTypeLabel(data.context?.specialType || data.specialType);
+  const memoTagText = data.memoTags.length ? data.memoTags.join(" / ") : "";
+  const rows = [recommendCsvHeaders()];
+  data.candidates.forEach((item) => {
+    rows.push([
+      targetDate,
+      item.store,
+      item.machine,
+      specialType,
+      memoTagText,
+      item.rank,
+      item.unit,
+      item.rating,
+      item.score,
+      item.averageDiff,
+      item.averageRbRate,
+      item.stats.avgTotalRate,
+      item.stats.positiveRate,
+      item.recentDiffTotal,
+      item.stats.count,
+      item.confidence,
+      item.reason,
+      item.concerns.join("、"),
+      item.recentHistory.join(" / ")
+    ]);
+  });
+  if (!data.candidates.length) rows.push([targetDate, data.store || "全店舗", data.machine || "全機種", specialType, memoTagText, "", "", "", "", "", "", "", "", "", data.base.length, "", "候補なし", "条件に合う保存データがありません。", ""]);
+  return rows;
+}
+
+function exportRecommendCsv() {
+  renderRecommendations();
+  const data = getRecommendationData();
+  const filename = buildExportFilename("juggler-recommend", { store: data.store, machine: data.machine }, data.targetDate || dateToInputValue(data.target));
+  exportCsv(filename, toCsv(buildRecommendCsvRows(data)));
+}
+
+function buildExportFilename(prefix, context = {}, dateText = "") {
+  const date = dateText || todayString();
+  const parts = [prefix, date];
+  if (context.store) parts.push(context.store);
+  if (context.machine) parts.push(context.machine);
+  return `${parts.map(sanitizeFilenamePart).filter(Boolean).join("_")}.csv`;
+}
+
+function sanitizeFilenamePart(value) {
+  return String(value || "").trim().replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, "_").slice(0, 60);
+}
+
 function mastersToCsv(masters) {
   const headers = ["機種名"];
   for (let setting = 1; setting <= 6; setting += 1) {
@@ -4495,7 +4645,7 @@ function mastersToCsv(masters) {
 function toCsv(rows) {
   return rows.map((row) => row.map((cell) => {
     const text = String(cell ?? "");
-    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }).join(",")).join("\n");
 }
 
