@@ -3495,9 +3495,11 @@ function bindRecommendations() {
     element.addEventListener("change", renderRecommendations);
   });
   $("#makeRecommendButton").addEventListener("click", renderRecommendations);
+  $("#makeChappyConsultButton")?.addEventListener("click", makeChappyConsultText);
+  $("#copyChappyConsultButton")?.addEventListener("click", copyChappyConsultText);
 }
 
-function renderRecommendations() {
+function getRecommendationData() {
   const targetDate = $("#recommendDate").value;
   const specialType = $("#recommendSpecialType")?.value || "normal";
   const store = $("#recommendStore").value.trim();
@@ -3521,14 +3523,179 @@ function renderRecommendations() {
     .slice(0, 10)
     .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
 
+  return { targetDate, specialType, store, machine, memoTags, target, base, context, candidates };
+}
+
+function renderRecommendations() {
+  const data = getRecommendationData();
   const summary = $("#recommendSummary");
-  if (summary) summary.textContent = buildRecommendationSummary(context, base.length, candidates.length);
-  renderRecommendationRanking($("#recommendList"), candidates.length ? candidates : [{
+  if (summary) summary.textContent = buildRecommendationSummary(data.context, data.base.length, data.candidates.length);
+  renderRecommendationRanking($("#recommendList"), data.candidates.length ? data.candidates : [{
     empty: true,
     title: "候補なし",
     rating: "要確認",
     body: "条件に合う保存データがありません。まずは台データを保存してください。"
   }]);
+}
+
+function makeChappyConsultText() {
+  renderRecommendations();
+  const data = getRecommendationData();
+  const textarea = $("#chappyConsultText");
+  if (!textarea) return;
+  textarea.value = buildChappyConsultText(data);
+  textarea.focus();
+  textarea.select();
+  showChappyCsvHint();
+  updateChappyCopyStatus("相談文を作成しました。必要に応じて編集してからコピーしてください。");
+}
+
+async function copyChappyConsultText() {
+  const textarea = $("#chappyConsultText");
+  if (!textarea) return;
+  if (!textarea.value.trim()) textarea.value = buildChappyConsultText(getRecommendationData());
+  showChappyCsvHint();
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(textarea.value);
+    } else {
+      textarea.focus();
+      textarea.select();
+      document.execCommand("copy");
+    }
+    updateChappyCopyStatus("コピーしました。ChatGPTへ貼り付けて相談できます。");
+  } catch (error) {
+    textarea.focus();
+    textarea.select();
+    updateChappyCopyStatus("自動コピーできませんでした。テキストを選択したので手動コピーしてください。");
+  }
+}
+
+function updateChappyCopyStatus(message) {
+  const status = $("#chappyCopyStatus");
+  if (status) status.textContent = message;
+}
+
+function showChappyCsvHint() {
+  const hint = $("#chappyCsvHint");
+  if (hint) hint.hidden = false;
+}
+
+function buildChappyConsultText(data) {
+  const { context, base, candidates } = data;
+  const lines = [];
+  const stats = calculateStats(base);
+  const dates = base.map((record) => record.date).sort();
+  const targetDateText = data.targetDate || dateToInputValue(context.target);
+  const storeText = data.store || "全店舗";
+  const machineText = data.machine || "全機種";
+  const memoTagText = data.memoTags.length ? data.memoTags.join("、") : "指定なし";
+
+  lines.push("# チャッピー相談用テキスト");
+  lines.push("");
+  lines.push("## 相談条件");
+  lines.push(`- 予想日：${targetDateText}（${weekdayName(context.weekday)}曜日）`);
+  lines.push(`- 店舗：${storeText}`);
+  lines.push(`- 機種：${machineText}`);
+  lines.push(`- 特定日タイプ：${specialTypeLabel(context.specialType)}${context.activeType !== context.specialType ? `（実評価：${specialTypeLabel(context.activeType)}）` : ""}`);
+  lines.push(`- メモタグ：${memoTagText}`);
+  lines.push(`- 対象データ件数：${base.length}件`);
+  lines.push("");
+  lines.push("## サイト側おすすめランキング");
+  if (candidates.length) {
+    candidates.forEach((item) => {
+      lines.push(`${item.rank}. ${item.store} / ${item.machine} / ${item.unit}番：${item.rating}（スコア${item.score}、平均差枚${formatDiff(item.averageDiff)}、平均RB${rateText(item.averageRbRate)}、直近3回差枚${formatDiff(item.recentDiffTotal)}、信頼度${item.confidence}）`);
+    });
+  } else {
+    lines.push("- 候補なし");
+  }
+  lines.push("");
+  lines.push("## 各候補台の詳細");
+  if (candidates.length) {
+    candidates.forEach((item) => {
+      lines.push(`### ${item.rank}位：${item.store} / ${item.machine} / ${item.unit}番`);
+      lines.push(`- 台番号：${item.unit}`);
+      lines.push(`- スコア：${item.score}`);
+      lines.push(`- 平均差枚：${formatDiff(item.averageDiff)}`);
+      lines.push(`- 平均RB：${rateText(item.averageRbRate)}`);
+      lines.push(`- 直近3回差枚：${formatDiff(item.recentDiffTotal)}`);
+      lines.push(`- 理由：${item.reason}`);
+      lines.push(`- 不安材料：${item.concerns.join("、")}`);
+      lines.push(`- 直近履歴：${item.recentHistory.join(" / ") || "なし"}`);
+    });
+  } else {
+    lines.push("- 条件に合う候補台がありません。");
+  }
+  lines.push("");
+  lines.push("## 関連する保存済みデータの要約");
+  lines.push(`- 期間：${dates[0] || "-"} 〜 ${dates[dates.length - 1] || "-"}`);
+  lines.push(`- 平均ゲーム：${Number(stats.avgGames || 0).toLocaleString()}G`);
+  lines.push(`- 平均差枚：${formatDiff(stats.avgDiff)}`);
+  lines.push(`- 平均BB：${rateText(stats.avgBbRate)}`);
+  lines.push(`- 平均RB：${rateText(stats.avgRbRate)}`);
+  lines.push(`- 平均合算：${rateText(stats.avgTotalRate)}`);
+  lines.push(`- プラス率：${stats.positiveRate}%`);
+  lines.push(`- 評価内訳：A ${stats.aCount}件 / B ${stats.bCount}件 / C ${stats.cCount}件`);
+  lines.push(...buildRecentRecordSummaryLines(base));
+  lines.push("");
+  lines.push("## 番号帯集計");
+  lines.push(...buildRangeSummaryLines(base));
+  lines.push("");
+  lines.push("## 同日付、同曜日、ゾロ目日の傾向");
+  lines.push(...buildSpecialTrendLines(base, context));
+  lines.push("");
+  lines.push("## 依頼文");
+  lines.push("上記データをもとに、実戦向けにおすすめ台をA/B/Cで順位付けしてください。");
+  lines.push("各台について、推し理由、不安材料、信頼度、最終優先順位を出してください。");
+  lines.push("差枚だけでなく、REG確率・合算・直近凹み・番号帯・イベントタグを重視してください。");
+  return lines.join("\n");
+}
+
+function buildRecentRecordSummaryLines(records) {
+  const recent = records.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 8);
+  if (!recent.length) return ["- 直近データ：なし"];
+  return ["- 直近データ：", ...recent.map((record) => `  - ${record.date} ${record.store} / ${record.machine} / ${record.unit}番：${formatDiff(record.diff)}、G${Number(record.games || 0).toLocaleString()}、RB${rateText(record.rbRate)}、合算${rateText(record.totalRate)}、評価${record.rating || "要確認"}、メモ「${record.memo || "なし"}」`)];
+}
+
+function buildRangeSummaryLines(records) {
+  const ranges = buildUnitRanges(records)
+    .map(({ label, items }) => ({ label, stats: calculateStats(items) }))
+    .sort((a, b) => b.stats.avgDiff - a.stats.avgDiff || b.stats.count - a.stats.count)
+    .slice(0, 12);
+  if (!ranges.length) return ["- 番号帯を作れるデータがありません。"];
+  return ranges.map(({ label, stats }) => `- ${label}：対象${stats.count}件、平均差枚${formatDiff(stats.avgDiff)}、プラス率${stats.positiveRate}%、平均RB${rateText(stats.avgRbRate)}、平均合算${rateText(stats.avgTotalRate)}、A評価率${percentage(stats.aCount, stats.count)}%`);
+}
+
+function buildSpecialTrendLines(records, context) {
+  const sameDay = records.filter((record) => getRecordDate(record).getDate() === context.day);
+  const sameWeekday = records.filter((record) => getRecordDate(record).getDay() === context.weekday);
+  const doubleDay = records.filter((record) => isDoubleDay(getRecordDate(record)));
+  const normalDay = records.filter((record) => !isDoubleDay(getRecordDate(record)));
+  return [
+    trendLine(`毎月${context.day}日`, sameDay),
+    trendLine(`${weekdayName(context.weekday)}曜日`, sameWeekday),
+    trendLine("ゾロ目日", doubleDay),
+    trendLine("非ゾロ目日", normalDay)
+  ];
+}
+
+function trendLine(label, records) {
+  const stats = calculateStats(records);
+  return `- ${label}：対象${stats.count}件、平均差枚${formatDiff(stats.avgDiff)}、プラス率${stats.positiveRate}%、平均RB${rateText(stats.avgRbRate)}、平均合算${rateText(stats.avgTotalRate)}、A評価${stats.aCount}件`;
+}
+
+function specialTypeLabel(value) {
+  return {
+    normal: "通常日",
+    "same-day": "毎月同じ日付",
+    double: "ゾロ目日",
+    "same-weekday": "同じ曜日",
+    "recent-dip": "直近凹み狙い"
+  }[value] || "通常日";
+}
+
+function dateToInputValue(date) {
+  return date.toISOString().slice(0, 10);
 }
 
 function buildRecommendationContext(target, specialType, filters) {

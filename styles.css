@@ -994,3 +994,29 @@ button:disabled {
 .editing-row textarea {
   min-width: 220px;
 }
+
+.consult-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 14px;
+  padding: 14px;
+}
+
+.consult-panel textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  line-height: 1.6;
+  min-height: 260px;
+}
+
+.consult-note {
+  background: #fff7e6;
+  border: 1px solid #f0d090;
+  border-radius: 8px;
+  color: #77510d;
+  font-weight: 800;
+  line-height: 1.6;
+  padding: 10px 12px;
+}
