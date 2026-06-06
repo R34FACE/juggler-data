@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ジャグラーデータ管理</title>
-  <link rel="manifest" href="manifest.json?v=10">
+  <link rel="manifest" href="manifest.json?v=12">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css?v=10">
+  <link rel="stylesheet" href="styles.css?v=12">
 </head>
 <body>
   <header class="app-header">
@@ -496,8 +496,17 @@
       </div>
       <div class="action-row">
         <button id="makeRecommendButton" type="button">おすすめを表示</button>
+        <button class="secondary" id="makeChappyConsultButton" type="button">チャッピー相談文を作成</button>
+        <button id="copyChappyConsultButton" type="button">コピー</button>
       </div>
       <div class="summary-banner" id="recommendSummary">条件を指定すると、保存済みデータからおすすめ台ランキングを表示します。</div>
+      <div class="consult-panel">
+        <label>チャッピー相談用テキスト
+          <textarea id="chappyConsultText" rows="14" placeholder="「チャッピー相談文を作成」を押すと、現在の条件・保存データ・おすすめランキングをもとにChatGPTへ貼り付ける相談文を作成します。"></textarea>
+        </label>
+        <p class="muted" id="chappyCopyStatus">OpenAI APIは使わず、端末内の保存データだけで作成します。</p>
+        <p class="consult-note" id="chappyCsvHint" hidden>勝負日の最終予想では、この相談文に加えて最新CSVをChatGPTに送ると、保存データ全体からより詳しく判断できます。</p>
+      </div>
       <div class="ranking-list" id="recommendList"></div>
     </section>
 
@@ -558,6 +567,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=12"></script>
 </body>
 </html>
