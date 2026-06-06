@@ -3489,12 +3489,50 @@ function percentage(part, total) {
 }
 
 function bindRecommendations() {
-  ["recommendDate", "recommendSpecialType", "recommendStore", "recommendMachine", "recommendMemoTags"].forEach((id) => {
+  ["recommendDate", "recommendSpecialType", "recommendMemoTags"].forEach((id) => {
     const element = $(`#${id}`);
     if (!element) return;
     element.addEventListener("input", renderRecommendations);
     element.addEventListener("change", renderRecommendations);
   });
+
+  const storeInput = $("#recommendStore");
+  const machineInput = $("#recommendMachine");
+  const storeSelect = $("#recommendStoreSelect");
+  const machineSelect = $("#recommendMachineSelect");
+
+  storeInput?.addEventListener("input", () => {
+    syncRecommendStoreSelectToInput();
+    renderRecommendMachineSelectOptions();
+    syncRecommendMachineSelectToInput();
+    renderRecommendations();
+  });
+  storeInput?.addEventListener("change", () => {
+    syncRecommendStoreSelectToInput();
+    renderRecommendMachineSelectOptions();
+    syncRecommendMachineSelectToInput();
+    renderRecommendations();
+  });
+  storeSelect?.addEventListener("change", () => {
+    if (storeInput) storeInput.value = storeSelect.value;
+    renderRecommendMachineSelectOptions();
+    syncRecommendMachineSelectToInput();
+    renderRecommendations();
+  });
+
+  machineInput?.addEventListener("input", () => {
+    syncRecommendMachineSelectToInput();
+    renderRecommendations();
+  });
+  machineInput?.addEventListener("change", () => {
+    syncRecommendMachineSelectToInput();
+    renderRecommendations();
+  });
+  machineSelect?.addEventListener("change", () => {
+    if (machineInput) machineInput.value = machineSelect.value;
+    renderRecommendations();
+  });
+
   $("#makeRecommendButton").addEventListener("click", renderRecommendations);
   $("#exportRecommendCsvButton")?.addEventListener("click", exportRecommendCsv);
   $("#makeChappyConsultButton")?.addEventListener("click", makeChappyConsultText);
@@ -4365,6 +4403,7 @@ function renderOptions() {
     machineSelect.innerHTML = `<option value="">機種を選択</option>${machines.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
     syncMachineSelectToInput();
   }
+  renderRecommendSelectOptions();
   renderFilterOptions();
   renderMemoTagSelect("#memoTagSelect", memoTags, "保存済みタグを選択");
   renderMemoTagSelect("#filterMemoTag", memoTags, "すべて");
@@ -4375,6 +4414,57 @@ function renderOptions() {
   renderMemoTagSelect("#recommendMemoTags", memoTags);
 }
 
+
+
+function renderRecommendSelectOptions() {
+  renderRecommendStoreSelectOptions();
+  renderRecommendMachineSelectOptions();
+}
+
+function renderRecommendStoreSelectOptions() {
+  const select = $("#recommendStoreSelect");
+  if (!select) return;
+  const stores = unique([
+    ...state.records.map((record) => String(record.store || "").trim()),
+    ...state.stores.map((store) => String(store || "").trim())
+  ]);
+  select.innerHTML = `<option value="">全店舗</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+  syncRecommendStoreSelectToInput();
+}
+
+function renderRecommendMachineSelectOptions() {
+  const select = $("#recommendMachineSelect");
+  if (!select) return;
+  const store = $("#recommendStore")?.value.trim() || "";
+  const allMachines = unique([
+    ...state.records.map((record) => String(record.machine || "").trim()),
+    ...state.masters.map((master) => String(master.name || "").trim())
+  ]);
+  const storeMachines = store ? unique(state.records
+    .filter((record) => record.store === store)
+    .map((record) => String(record.machine || "").trim())) : [];
+  const machines = store
+    ? [...storeMachines, ...allMachines.filter((machine) => !storeMachines.includes(machine))]
+    : allMachines;
+  select.innerHTML = `<option value="">全機種</option>${machines.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+  syncRecommendMachineSelectToInput();
+}
+
+function syncRecommendStoreSelectToInput() {
+  const storeSelect = $("#recommendStoreSelect");
+  const storeInput = $("#recommendStore");
+  if (!storeSelect || !storeInput) return;
+  const value = storeInput.value.trim();
+  storeSelect.value = value && [...storeSelect.options].some((option) => option.value === value) ? value : "";
+}
+
+function syncRecommendMachineSelectToInput() {
+  const machineSelect = $("#recommendMachineSelect");
+  const machineInput = $("#recommendMachine");
+  if (!machineSelect || !machineInput) return;
+  const value = machineInput.value.trim();
+  machineSelect.value = value && [...machineSelect.options].some((option) => option.value === value) ? value : "";
+}
 
 function syncMachineSelectToInput() {
   const machineSelect = $("#machineSelect");

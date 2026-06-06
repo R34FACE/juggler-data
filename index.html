@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ジャグラーデータ管理</title>
-  <link rel="manifest" href="manifest.json?v=13">
+  <link rel="manifest" href="manifest.json?v=14">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css?v=13">
+  <link rel="stylesheet" href="styles.css?v=14">
 </head>
 <body>
   <header class="app-header">
@@ -492,8 +492,24 @@
             <option value="recent-dip">直近凹み狙い</option>
           </select>
         </label>
-        <label>店舗<input id="recommendStore" list="storeList" placeholder="全店舗"></label>
-        <label>機種<input id="recommendMachine" list="machineList" placeholder="全機種"></label>
+        <label class="store-field recommend-choice-field">
+          店舗
+          <div class="store-entry">
+            <input id="recommendStore" list="storeList" placeholder="全店舗">
+            <select id="recommendStoreSelect">
+              <option value="">全店舗</option>
+            </select>
+          </div>
+        </label>
+        <label class="machine-field recommend-choice-field">
+          機種
+          <div class="store-entry">
+            <input id="recommendMachine" list="machineList" placeholder="全機種">
+            <select id="recommendMachineSelect">
+              <option value="">全機種</option>
+            </select>
+          </div>
+        </label>
         <label>メモタグ条件
           <select id="recommendMemoTags" multiple size="4" aria-label="おすすめに使うメモタグ"></select>
         </label>
@@ -572,6 +588,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js?v=13"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>

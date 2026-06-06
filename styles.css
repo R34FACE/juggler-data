@@ -567,8 +567,13 @@ main {
   grid-template-columns: minmax(0, 1fr) minmax(140px, 220px);
 }
 
+.recommend-choice-field .store-entry {
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 220px);
+}
+
 @media (max-width: 720px) {
-  .machine-field .store-entry {
+  .machine-field .store-entry,
+  .recommend-choice-field .store-entry {
     grid-template-columns: 1fr;
   }
 }
