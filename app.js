@@ -97,23 +97,45 @@ function bindTabs() {
 }
 
 function bindDraftTable() {
-  $("#addRowButton").addEventListener("click", () => addDraftRow());
-  $("#machineInput").addEventListener("input", () => {
-    syncMachineSelectToInput();
-    refreshDraftEvaluations();
-  });
-  $("#machineSelect").addEventListener("change", () => {
-    const value = $("#machineSelect").value;
-    if (!value) return;
-    $("#machineInput").value = value;
-    refreshDraftEvaluations();
-  });
-  $("#clearDraftButton").addEventListener("click", () => {
-    $("#draftTable tbody").innerHTML = "";
-    addDraftRow();
-    updateDraftHint();
-  });
-  $("#saveDraftButton").addEventListener("click", saveDraftRows);
+  const saveButton = $("#saveDraftButton");
+  if (saveButton) {
+    saveButton.addEventListener("click", saveDraftRows);
+  }
+
+  const addButton = $("#addRowButton");
+  if (addButton) {
+    addButton.addEventListener("click", () => addDraftRow());
+  }
+
+  const machineInput = $("#machineInput");
+  if (machineInput) {
+    machineInput.addEventListener("input", () => {
+      if (typeof syncMachineSelectToInput === "function") {
+        syncMachineSelectToInput();
+      }
+      refreshDraftEvaluations();
+    });
+  }
+
+  const machineSelect = $("#machineSelect");
+  if (machineSelect && machineInput) {
+    machineSelect.addEventListener("change", () => {
+      const value = machineSelect.value;
+      if (!value) return;
+      machineInput.value = value;
+      refreshDraftEvaluations();
+    });
+  }
+
+  const clearButton = $("#clearDraftButton");
+  if (clearButton) {
+    clearButton.addEventListener("click", () => {
+      const draftBody = $("#draftTable tbody");
+      if (draftBody) draftBody.innerHTML = "";
+      addDraftRow();
+      updateDraftHint();
+    });
+  }
 }
 
 function bindStores() {
@@ -1561,7 +1583,12 @@ function clearGraphResults() {
 
 function clearBasicOcrState() {
   const basicInput = $("#basicImage");
+  const previewPanel = $("#ocrPreviewPanel");
+  const fileSelect = $("#ocrPreviewFileSelect");
+
   if (basicInput) basicInput.value = "";
+  if (previewPanel) previewPanel.hidden = true;
+  if (fileSelect) fileSelect.innerHTML = "";
 
   state.ocrPreview.files = [];
   state.ocrPreview.settings = [];
@@ -1569,14 +1596,8 @@ function clearBasicOcrState() {
   state.ocrPreview.image = null;
   state.ocrPreview.mode = "tableOnly";
 
-  const previewPanel = $("#ocrPreviewPanel");
-  if (previewPanel) previewPanel.hidden = true;
-
-  const fileSelect = $("#ocrPreviewFileSelect");
-  if (fileSelect) fileSelect.innerHTML = "";
-
-  selectOcrMode("tableOnly");
-  renderOcrPreview();
+  if (typeof selectOcrMode === "function") selectOcrMode("tableOnly");
+  if (typeof renderOcrPreview === "function") renderOcrPreview();
 }
 
 function createGraphPreviewCard(result) {
@@ -2616,12 +2637,22 @@ function saveDraftRows() {
   });
 
   saveJson(STORAGE_KEYS.records, state.records);
-  $("#draftTable tbody").innerHTML = "";
-  addDraftRow();
-  $("#sessionMemo").value = "";
-  clearGraphResults();
-  clearBasicOcrState();
-  updateUploadStatus();
+
+  try {
+    const draftBody = $("#draftTable tbody");
+    if (draftBody) draftBody.innerHTML = "";
+    addDraftRow();
+
+    const sessionMemoInput = $("#sessionMemo");
+    if (sessionMemoInput) sessionMemoInput.value = "";
+
+    clearGraphResults();
+    clearBasicOcrState();
+    updateUploadStatus();
+  } catch (error) {
+    console.error("保存後の画面リセットでエラー:", error);
+  }
+
   renderAll();
   alert(`${rows.length}台を保存しました。`);
 }
