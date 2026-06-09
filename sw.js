@@ -1,10 +1,10 @@
-const CACHE_NAME = "juggler-data-v17";
+const CACHE_NAME = "juggler-data-v18";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=17",
-  "./app.js?v=17",
-  "./manifest.json?v=17",
+  "./styles.css?v=18",
+  "./app.js?v=18",
+  "./manifest.json?v=18",
   "./icons/icon.svg"
 ];
 

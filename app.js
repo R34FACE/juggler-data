@@ -21,8 +21,13 @@ const INITIAL_MEMO_TAGS = [
 
 const INITIAL_MASTERS = loadJson(STORAGE_KEYS.masters, []);
 
+const RECORDS_DB_NAME = "jugglerDataDb";
+const RECORDS_DB_VERSION = 1;
+const RECORDS_STORE_NAME = "records";
+const MIGRATED_RECORDS_BACKUP_KEY = `${STORAGE_KEYS.records}.backupMigrated`;
+
 const state = {
-  records: hydrateRecords(loadJson(STORAGE_KEYS.records, [])),
+  records: [],
   masters: INITIAL_MASTERS,
   stores: loadJson(STORAGE_KEYS.stores, []),
   memoTags: loadMemoTags(),
@@ -37,7 +42,7 @@ const state = {
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
   initializeDates();
   buildSettingsForm();
   bindTabs();
@@ -50,6 +55,16 @@ document.addEventListener("DOMContentLoaded", () => {
   bindAnalysis();
   bindRecommendations();
   bindMasters();
+  updateStorageStatus("保存データ読込中 / IndexedDB保存");
+
+  try {
+    await requestPersistentStorage();
+    await initializeRecordsStorage();
+  } catch (error) {
+    console.error("保存データ初期化エラー:", error);
+    alert(`保存データの読み込みに失敗しました。\n${error.name}: ${error.message}`);
+  }
+
   refreshRecordEvaluations();
   addDraftRow();
   renderAll();
@@ -139,26 +154,182 @@ function hydrateRecords(records) {
   return records.map(hydrateRecord);
 }
 
-function saveRecords() {
-  const compactRecords = state.records.map(compactRecordForStorage);
-  saveJson(STORAGE_KEYS.records, compactRecords);
+function openRecordsDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error("このブラウザはIndexedDBに対応していません。"));
+      return;
+    }
+
+    const request = indexedDB.open(RECORDS_DB_NAME, RECORDS_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(RECORDS_STORE_NAME)) {
+        db.createObjectStore(RECORDS_STORE_NAME, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("IndexedDBを開けませんでした。"));
+    request.onblocked = () => reject(new Error("IndexedDBの更新がブロックされました。ほかのタブを閉じて再読み込みしてください。"));
+  });
 }
 
-function getStorageUsageText() {
+function withRecordsStore(mode, callback) {
+  return openRecordsDb().then((db) => new Promise((resolve, reject) => {
+    const transaction = db.transaction(RECORDS_STORE_NAME, mode);
+    const store = transaction.objectStore(RECORDS_STORE_NAME);
+    let callbackResult;
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve(callbackResult);
+    };
+    transaction.onerror = () => {
+      const error = transaction.error || new Error("IndexedDBトランザクションに失敗しました。");
+      db.close();
+      reject(error);
+    };
+    transaction.onabort = () => {
+      const error = transaction.error || new Error("IndexedDBトランザクションが中断されました。");
+      db.close();
+      reject(error);
+    };
+
+    try {
+      callbackResult = callback(store);
+    } catch (error) {
+      transaction.abort();
+      reject(error);
+    }
+  }));
+}
+
+function loadRecordsFromDb() {
+  return withRecordsStore("readonly", (store) => new Promise((resolve, reject) => {
+    const request = store.getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error || new Error("IndexedDBから保存データを読み込めませんでした。"));
+  }));
+}
+
+function saveRecordToDb(record) {
+  return withRecordsStore("readwrite", (store) => {
+    store.put(compactRecordForStorage(record));
+  });
+}
+
+function saveRecordsToDb(records) {
+  return withRecordsStore("readwrite", (store) => {
+    records.map(compactRecordForStorage).forEach((record) => store.put(record));
+  });
+}
+
+function deleteRecordFromDb(id) {
+  return withRecordsStore("readwrite", (store) => {
+    store.delete(id);
+  });
+}
+
+function replaceRecordsInDb(records) {
+  return withRecordsStore("readwrite", (store) => {
+    store.clear();
+    records.map(compactRecordForStorage).forEach((record) => store.put(record));
+  });
+}
+
+function clearRecordsDb() {
+  return withRecordsStore("readwrite", (store) => {
+    store.clear();
+  });
+}
+
+async function migrateLocalStorageRecordsToIndexedDb() {
+  const raw = localStorage.getItem(STORAGE_KEYS.records);
+  if (!raw) return 0;
+
+  const parsed = loadJson(STORAGE_KEYS.records, []);
+  if (!Array.isArray(parsed) || !parsed.length) {
+    localStorage.removeItem(STORAGE_KEYS.records);
+    return 0;
+  }
+
+  const compact = parsed.map(compactRecordForStorage);
+  await saveRecordsToDb(compact);
+
+  try {
+    localStorage.setItem(MIGRATED_RECORDS_BACKUP_KEY, raw);
+  } catch (error) {
+    console.warn("移行済みlocalStorageバックアップの作成に失敗しました:", error);
+  }
+  localStorage.removeItem(STORAGE_KEYS.records);
+  alert(`localStorageの保存データをIndexedDBへ移行しました。対象 ${compact.length}件`);
+  return compact.length;
+}
+
+async function initializeRecordsStorage() {
+  await migrateLocalStorageRecordsToIndexedDb();
+  const records = await loadRecordsFromDb();
+  state.records = hydrateRecords(records);
+}
+
+async function saveRecords() {
+  await replaceRecordsInDb(state.records);
+}
+
+async function requestPersistentStorage() {
+  if (navigator.storage?.persist) {
+    try {
+      await navigator.storage.persist();
+    } catch (error) {
+      console.warn("永続保存リクエストに失敗しました:", error);
+    }
+  }
+}
+
+function formatStorageBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "不明";
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  return `${Math.round(bytes / 1024)}KB`;
+}
+
+async function getStorageUsageText() {
+  if (navigator.storage?.estimate) {
+    const estimate = await navigator.storage.estimate();
+    return formatStorageBytes(estimate.usage || 0);
+  }
+
   const total = Object.values(STORAGE_KEYS).reduce((sum, key) => {
+    if (key === STORAGE_KEYS.records) return sum;
     const value = localStorage.getItem(key) || "";
     return sum + value.length;
   }, 0);
   return `${Math.round(total / 1024)}KB`;
 }
 
-function compactExistingSavedRecords() {
+function updateStorageStatus(message) {
+  const storageStatus = $("#storageStatus");
+  if (storageStatus) storageStatus.textContent = message;
+}
+
+async function refreshStorageStatus() {
+  const storageStatus = $("#storageStatus");
+  if (!storageStatus) return;
+  storageStatus.textContent = `保存 ${state.records.length}件 / IndexedDB保存`;
+
+  try {
+    const usage = await getStorageUsageText();
+    storageStatus.textContent = `保存 ${state.records.length}件 / 使用量 約${usage} / IndexedDB保存`;
+  } catch (error) {
+    console.warn("ストレージ使用量を取得できませんでした:", error);
+  }
+}
+
+async function compactExistingSavedRecords() {
   if (!confirm("保存データを軽量化します。実行前にCSVバックアップをおすすめします。続行しますか？")) return;
 
   try {
-    const raw = loadJson(STORAGE_KEYS.records, []);
-    const compact = raw.map(compactRecordForStorage);
-    saveJson(STORAGE_KEYS.records, compact);
+    const compact = state.records.map(compactRecordForStorage);
+    await replaceRecordsInDb(compact);
     state.records = hydrateRecords(compact);
     renderAll();
     alert(`保存データを軽量化しました。対象 ${compact.length}件`);
@@ -167,7 +338,6 @@ function compactExistingSavedRecords() {
     alert(`保存データの軽量化に失敗しました。${error.name}: ${error.message}`);
   }
 }
-
 
 function loadMemoTags() {
   const savedRaw = localStorage.getItem(STORAGE_KEYS.memoTags);
@@ -2699,7 +2869,7 @@ function isDraftRowEmpty(row) {
   return !(data.unit || data.games || data.bb || data.rb || data.diff || data.memo);
 }
 
-function saveDraftRows() {
+async function saveDraftRows() {
   console.log("saveDraftRows start");
 
   const date = $("#inputDate")?.value || "";
@@ -2756,7 +2926,7 @@ function saveDraftRows() {
     state.records = [...state.records, ...newRecords.map(hydrateRecord)];
 
     try {
-      saveRecords();
+      await saveRecordsToDb(newRecords);
     } catch (error) {
       state.records = previousRecords;
       throw error;
@@ -2768,8 +2938,7 @@ function saveDraftRows() {
   } catch (error) {
     console.error("台データ保存エラー:", error);
     alert(`台データの保存に失敗しました。
-${error.name}: ${error.message}
-保存データが大きくなっている可能性があります。CSVバックアップ後、保存データ軽量化を実行してください。`);
+${error.name}: ${error.message}`);
     return;
   }
 
@@ -2879,11 +3048,19 @@ function bindRecords() {
   $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
   $("#bulkAddTagButton").addEventListener("click", () => bulkUpdateMemoTags("add"));
   $("#bulkRemoveTagButton").addEventListener("click", () => bulkUpdateMemoTags("remove"));
-  $("#deleteAllRecordsButton").addEventListener("click", () => {
+  $("#deleteAllRecordsButton").addEventListener("click", async () => {
     if (!confirm("保存データをすべて削除しますか？")) return;
+    const previousRecords = state.records;
     state.records = [];
     state.editingRecordId = null;
-    saveRecords();
+    try {
+      await clearRecordsDb();
+    } catch (error) {
+      state.records = previousRecords;
+      console.error("全台データ削除エラー:", error);
+      alert(`保存データの全削除に失敗しました。\n${error.name}: ${error.message}`);
+      return;
+    }
     renderAll();
   });
 }
@@ -3032,7 +3209,7 @@ function saveInlineRecord(id, row) {
   saveRecordFromRow(id, row);
 }
 
-function saveRecordFromRow(id, row) {
+async function saveRecordFromRow(id, row) {
   const index = state.records.findIndex((item) => item.id === id);
   if (!row || index === -1) return;
 
@@ -3070,8 +3247,20 @@ function saveRecordFromRow(id, row) {
   });
 
   state.records[index] = updated;
-  saveStoreName(updated.store);
-  saveRecords();
+  try {
+    await saveRecordToDb(updated);
+  } catch (error) {
+    state.records[index] = original;
+    console.error("台データ更新エラー:", error);
+    alert(`台データの更新に失敗しました。\n${error.name}: ${error.message}`);
+    return;
+  }
+
+  try {
+    saveStoreName(updated.store);
+  } catch (error) {
+    console.error("店舗名保存エラー:", error);
+  }
   state.editingRecordId = null;
   renderAll();
 }
@@ -3084,10 +3273,18 @@ function editRecord(id) {
   startInlineEdit(id);
 }
 
-function deleteRecord(id) {
+async function deleteRecord(id) {
   if (!confirm("このデータを削除しますか？")) return;
+  const previousRecords = state.records;
   state.records = state.records.filter((item) => item.id !== id);
-  saveRecords();
+  try {
+    await deleteRecordFromDb(id);
+  } catch (error) {
+    state.records = previousRecords;
+    console.error("台データ削除エラー:", error);
+    alert(`台データの削除に失敗しました。\n${error.name}: ${error.message}`);
+    return;
+  }
   renderAll();
 }
 
@@ -4414,10 +4611,10 @@ function refreshRecordEvaluations() {
     changed = changed || hasReevaluationChange(record, updated);
     return updated;
   });
-  if (changed) saveRecords();
+  if (changed) refreshStorageStatus();
 }
 
-function reevaluateSavedRecords() {
+async function reevaluateSavedRecords() {
   const total = state.records.length;
   if (!total) {
     alert("再判定する保存済みデータがありません。");
@@ -4431,6 +4628,7 @@ function reevaluateSavedRecords() {
   ].join("\n"));
   if (!confirmed) return;
 
+  const previousRecords = state.records;
   const ratingCounts = Object.fromEntries(RATING_LABELS.map((label) => [label, 0]));
   const transitions = {};
   let changedCount = 0;
@@ -4451,7 +4649,14 @@ function reevaluateSavedRecords() {
     return updated;
   });
 
-  saveRecords();
+  try {
+    await saveRecords();
+  } catch (error) {
+    state.records = previousRecords;
+    console.error("再判定データ保存エラー:", error);
+    alert(`再判定結果の保存に失敗しました。\n${error.name}: ${error.message}`);
+    return;
+  }
   renderAll();
 
   const ratingSummary = RATING_LABELS.map((label) => `${label} ${ratingCounts[label]}件`).join("、");
@@ -4515,7 +4720,7 @@ function bulkUpdateMemoTags(mode) {
   updateMemoTagsForRecords(getFilteredRecords(), tags, mode, "検索結果");
 }
 
-function updateMemoTagsForRecords(targets, tags, mode, targetLabel) {
+async function updateMemoTagsForRecords(targets, tags, mode, targetLabel) {
   if (!targets.length) {
     alert(`${targetLabel}が0件のため、一括操作できません。`);
     return;
@@ -4525,6 +4730,7 @@ function updateMemoTagsForRecords(targets, tags, mode, targetLabel) {
   if (!confirm(`${targetLabel} ${targets.length}件にタグ「${tags.join("、")}」を${verb}します。よろしいですか？`)) return;
 
   const targetIds = new Set(targets.map((record) => record.id));
+  const previousRecords = state.records;
   let changedCount = 0;
   state.records = state.records.map((record) => {
     if (!targetIds.has(record.id)) return record;
@@ -4538,7 +4744,14 @@ function updateMemoTagsForRecords(targets, tags, mode, targetLabel) {
     return { ...record, memo: nextMemo, updatedAt: new Date().toISOString() };
   });
 
-  saveRecords();
+  try {
+    await saveRecords();
+  } catch (error) {
+    state.records = previousRecords;
+    console.error("タグ一括更新保存エラー:", error);
+    alert(`タグ一括更新の保存に失敗しました。\n${error.name}: ${error.message}`);
+    return;
+  }
   renderAll();
   alert(`タグ${verb}完了：${changedCount}件`);
 }
@@ -4569,8 +4782,7 @@ function renderAll() {
   renderSummary();
   renderAnalysis();
   renderMasters();
-  const storageStatus = $("#storageStatus");
-  if (storageStatus) storageStatus.textContent = `保存 ${state.records.length}件 / 使用量 約${getStorageUsageText()}`;
+  refreshStorageStatus();
 }
 
 function renderOptions() {
@@ -5055,6 +5267,7 @@ function importRecordsCsv(file) {
     const action = chooseDuplicateImportAction(duplicates.length);
     if (action === "cancel") return;
 
+    const previousRecords = state.records;
     let addedCount = 0;
     let overwrittenCount = 0;
     let skippedCount = 0;
@@ -5080,9 +5293,14 @@ function importRecordsCsv(file) {
       state.records = state.records.filter((_, index) => !duplicateIndexesToRemove.has(index));
     }
 
-    saveRecords();
-    renderAll();
-    alert(`CSV取込が完了しました。追加: ${addedCount}件 / 上書き: ${overwrittenCount}件 / 未取込: ${skippedCount}件`);
+    return saveRecords().then(() => {
+      renderAll();
+      alert(`CSV取込が完了しました。追加: ${addedCount}件 / 上書き: ${overwrittenCount}件 / 未取込: ${skippedCount}件`);
+    }).catch((error) => {
+      state.records = previousRecords;
+      console.error("CSV取込保存エラー:", error);
+      alert(`CSV取込データの保存に失敗しました。\n${error.name}: ${error.message}`);
+    });
   });
 }
 
