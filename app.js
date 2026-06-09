@@ -176,6 +176,13 @@ function saveStoreName(store) {
   renderOptions();
 }
 
+function saveStoreNameSilently(store) {
+  const trimmed = String(store || "").trim();
+  if (!trimmed) return;
+  state.stores = unique([...state.stores, trimmed]);
+  saveJson(STORAGE_KEYS.stores, state.stores);
+}
+
 function bindMemoTags() {
   $("#saveMemoTagButton").addEventListener("click", () => {
     const tag = $("#memoTagInput").value.trim();
@@ -2589,72 +2596,115 @@ function isDraftRowEmpty(row) {
 }
 
 function saveDraftRows() {
-  const date = $("#inputDate").value;
-  const store = $("#storeInput").value.trim();
-  const machine = $("#machineInput").value.trim();
-  const sessionMemo = $("#sessionMemo").value.trim();
+  console.log("saveDraftRows start");
+
+  const date = $("#inputDate")?.value || "";
+  const store = $("#storeInput")?.value.trim() || "";
+  const machine = $("#machineInput")?.value.trim() || "";
+  const sessionMemo = $("#sessionMemo")?.value.trim() || "";
+
+  console.log("saveDraftRows store", store);
+  console.log("saveDraftRows machine", machine);
 
   if (!date || !store || !machine) {
     alert("日付、店舗、機種を入力してください。");
     return;
   }
 
-  const rows = [...$("#draftTable tbody").children]
+  const draftBody = $("#draftTable tbody");
+  const rows = [...(draftBody?.children || [])]
     .map((row) => ({ row, data: getDraftRowData(row) }))
     .filter(({ data }) => data.unit || data.games || data.bb || data.rb || data.diff);
+
+  console.log("saveDraftRows rows.length", rows.length);
 
   if (!rows.length) {
     alert("保存する台データを入力してください。");
     return;
   }
 
-  saveStoreName(store);
-
-  rows.forEach(({ row, data }) => {
-    const rates = calculateRates(data.games, data.bb, data.rb);
-    const evaluation = evaluateRecord({ ...data, ...rates, machine });
-    state.records.push({
-      id: uid("record"),
-      date,
-      store,
-      machine,
-      unit: data.unit,
-      games: data.games,
-      bb: data.bb,
-      rb: data.rb,
-      bbRate: rates.bb,
-      rbRate: rates.rb,
-      totalRate: rates.total,
-      diff: data.diff,
-      rating: evaluation.rating || "要確認",
-      expectation: evaluation.expectation || 0,
-      confidence: evaluation.confidence || "低",
-      reason: evaluation.reason || "手動入力データです。",
-      nearestSettings: evaluation.nearestSettings || "-",
-      memo: [sessionMemo, data.ocrStatus && data.ocrStatus !== "手動" ? `OCR確認: ${data.ocrStatus}${data.ocrConfidence ? ` (${data.ocrConfidence}%)` : ""}` : "", data.memo].filter(Boolean).join(" / "),
-      createdAt: new Date().toISOString()
-    });
-  });
-
-  saveJson(STORAGE_KEYS.records, state.records);
+  let savedCount = 0;
 
   try {
-    const draftBody = $("#draftTable tbody");
+    const newRecords = rows.map(({ data }) => {
+      const rates = calculateRates(data.games, data.bb, data.rb);
+      const evaluation = evaluateRecord({ ...data, ...rates, machine });
+
+      return {
+        id: uid("record"),
+        date,
+        store,
+        machine,
+        unit: data.unit,
+        games: data.games,
+        bb: data.bb,
+        rb: data.rb,
+        bbRate: rates.bb,
+        rbRate: rates.rb,
+        totalRate: rates.total,
+        diff: data.diff,
+        rating: evaluation.rating || "要確認",
+        expectation: evaluation.expectation || 0,
+        confidence: evaluation.confidence || "低",
+        reason: evaluation.reason || "手動入力データです。",
+        nearestSettings: evaluation.nearestSettings || "-",
+        memo: [
+          sessionMemo,
+          data.ocrStatus && data.ocrStatus !== "手動"
+            ? `OCR確認: ${data.ocrStatus}${data.ocrConfidence ? ` (${data.ocrConfidence}%)` : ""}`
+            : "",
+          data.memo
+        ].filter(Boolean).join(" / "),
+        createdAt: new Date().toISOString()
+      };
+    });
+
+    const previousRecords = state.records;
+    state.records = [...state.records, ...newRecords];
+
+    try {
+      saveJson(STORAGE_KEYS.records, state.records);
+    } catch (error) {
+      state.records = previousRecords;
+      throw error;
+    }
+
+    savedCount = newRecords.length;
+    console.log("saveDraftRows savedCount", savedCount);
+    console.log("saveDraftRows state.records.length", state.records.length);
+  } catch (error) {
+    console.error("台データ保存エラー:", error);
+    alert("台データの保存に失敗しました。入力値または保存容量を確認してください。");
+    return;
+  }
+
+  try {
+    saveStoreNameSilently(store);
+  } catch (error) {
+    console.error("店舗名保存エラー:", error);
+  }
+
+  try {
     if (draftBody) draftBody.innerHTML = "";
     addDraftRow();
 
     const sessionMemoInput = $("#sessionMemo");
     if (sessionMemoInput) sessionMemoInput.value = "";
 
-    clearGraphResults();
-    clearBasicOcrState();
-    updateUploadStatus();
+    if (typeof clearGraphResults === "function") clearGraphResults();
+    if (typeof clearBasicOcrState === "function") clearBasicOcrState();
+    if (typeof updateUploadStatus === "function") updateUploadStatus();
   } catch (error) {
-    console.error("保存後の画面リセットでエラー:", error);
+    console.error("保存後リセットエラー:", error);
   }
 
-  renderAll();
-  alert(`${rows.length}台を保存しました。`);
+  try {
+    renderAll();
+  } catch (error) {
+    console.error("保存後の画面更新エラー:", error);
+  }
+
+  alert(`${savedCount}台を保存しました。`);
 }
 
 function calculateRates(games, bb, rb) {
