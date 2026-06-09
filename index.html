@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ジャグラーデータ管理</title>
-  <link rel="manifest" href="manifest.json?v=16">
+  <link rel="manifest" href="manifest.json?v=17">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css?v=16">
+  <link rel="stylesheet" href="styles.css?v=17">
 </head>
 <body>
   <header class="app-header">
@@ -264,6 +264,7 @@
         <button id="exportLatestRecordsButton" type="button">最新版CSV出力</button>
         <button class="secondary" id="exportDatedRecordsButton" type="button">日付付きCSV出力</button>
         <button class="secondary" id="reevaluateRecordsButton" type="button">保存済みデータを再判定</button>
+        <button class="secondary" id="compactRecordsButton" type="button">保存データを軽量化</button>
         <label class="file-button">CSV取込<input type="file" id="importRecordsInput" accept=".csv,text/csv"></label>
         <button class="danger subtle" id="deleteAllRecordsButton" type="button">全削除</button>
       </div>
@@ -588,6 +589,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js?v=16"></script>
+  <script src="app.js?v=17"></script>
 </body>
 </html>

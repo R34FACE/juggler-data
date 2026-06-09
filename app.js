@@ -19,9 +19,11 @@ const INITIAL_MEMO_TAGS = [
   "上げ狙い"
 ];
 
+const INITIAL_MASTERS = loadJson(STORAGE_KEYS.masters, []);
+
 const state = {
-  records: loadJson(STORAGE_KEYS.records, []),
-  masters: loadJson(STORAGE_KEYS.masters, []),
+  records: hydrateRecords(loadJson(STORAGE_KEYS.records, [])),
+  masters: INITIAL_MASTERS,
   stores: loadJson(STORAGE_KEYS.stores, []),
   memoTags: loadMemoTags(),
   sort: { key: "date", direction: "desc" },
@@ -64,6 +66,108 @@ function loadJson(key, fallback) {
 function saveJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
+
+
+function compactRecordForStorage(record) {
+  const compact = {
+    id: record.id,
+    date: record.date,
+    store: record.store,
+    machine: record.machine,
+    unit: record.unit,
+    games: Number(record.games || 0),
+    bb: Number(record.bb || 0),
+    rb: Number(record.rb || 0),
+    diff: Number(record.diff || 0),
+    memo: record.memo || "",
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    archived: record.archived || undefined,
+    archiveReason: record.archiveReason || undefined,
+    archivedAt: record.archivedAt || undefined
+  };
+
+  Object.keys(compact).forEach((key) => {
+    if (compact[key] === undefined || compact[key] === null || compact[key] === "") {
+      delete compact[key];
+    }
+  });
+
+  return compact;
+}
+
+function hydrateRecord(record) {
+  const games = Number(record.games || 0);
+  const bb = Number(record.bb || 0);
+  const rb = Number(record.rb || 0);
+  const diff = Number(record.diff || 0);
+  const rates = calculateRates(games, bb, rb);
+  let evaluation = {};
+
+  try {
+    evaluation = evaluateRecord({
+      ...record,
+      games,
+      bb,
+      rb,
+      diff,
+      ...rates,
+      machine: record.machine
+    });
+  } catch (error) {
+    console.warn("保存データの再判定を後回しにしました:", error);
+  }
+
+  return {
+    ...record,
+    games,
+    bb,
+    rb,
+    diff,
+    bbRate: rates.bb,
+    rbRate: rates.rb,
+    totalRate: rates.total,
+    rating: evaluation.rating || record.rating || "要確認",
+    expectation: evaluation.expectation || record.expectation || 0,
+    confidence: evaluation.confidence || record.confidence || "低",
+    reason: evaluation.reason || record.reason || "手動入力データです。",
+    nearestSettings: evaluation.nearestSettings || record.nearestSettings || "-"
+  };
+}
+
+function hydrateRecords(records) {
+  return records.map(hydrateRecord);
+}
+
+function saveRecords() {
+  const compactRecords = state.records.map(compactRecordForStorage);
+  saveJson(STORAGE_KEYS.records, compactRecords);
+}
+
+function getStorageUsageText() {
+  const total = Object.values(STORAGE_KEYS).reduce((sum, key) => {
+    const value = localStorage.getItem(key) || "";
+    return sum + value.length;
+  }, 0);
+  return `${Math.round(total / 1024)}KB`;
+}
+
+function compactExistingSavedRecords() {
+  if (!confirm("保存データを軽量化します。実行前にCSVバックアップをおすすめします。続行しますか？")) return;
+
+  try {
+    const raw = loadJson(STORAGE_KEYS.records, []);
+    const compact = raw.map(compactRecordForStorage);
+    saveJson(STORAGE_KEYS.records, compact);
+    state.records = hydrateRecords(compact);
+    renderAll();
+    alert(`保存データを軽量化しました。対象 ${compact.length}件`);
+  } catch (error) {
+    console.error("保存データ軽量化エラー:", error);
+    alert(`保存データの軽量化に失敗しました。${error.name}: ${error.message}`);
+  }
+}
+
 
 function loadMemoTags() {
   const savedRaw = localStorage.getItem(STORAGE_KEYS.memoTags);
@@ -2627,9 +2731,6 @@ function saveDraftRows() {
 
   try {
     const newRecords = rows.map(({ data }) => {
-      const rates = calculateRates(data.games, data.bb, data.rb);
-      const evaluation = evaluateRecord({ ...data, ...rates, machine });
-
       return {
         id: uid("record"),
         date,
@@ -2639,15 +2740,7 @@ function saveDraftRows() {
         games: data.games,
         bb: data.bb,
         rb: data.rb,
-        bbRate: rates.bb,
-        rbRate: rates.rb,
-        totalRate: rates.total,
         diff: data.diff,
-        rating: evaluation.rating || "要確認",
-        expectation: evaluation.expectation || 0,
-        confidence: evaluation.confidence || "低",
-        reason: evaluation.reason || "手動入力データです。",
-        nearestSettings: evaluation.nearestSettings || "-",
         memo: [
           sessionMemo,
           data.ocrStatus && data.ocrStatus !== "手動"
@@ -2660,10 +2753,10 @@ function saveDraftRows() {
     });
 
     const previousRecords = state.records;
-    state.records = [...state.records, ...newRecords];
+    state.records = [...state.records, ...newRecords.map(hydrateRecord)];
 
     try {
-      saveJson(STORAGE_KEYS.records, state.records);
+      saveRecords();
     } catch (error) {
       state.records = previousRecords;
       throw error;
@@ -2674,7 +2767,9 @@ function saveDraftRows() {
     console.log("saveDraftRows state.records.length", state.records.length);
   } catch (error) {
     console.error("台データ保存エラー:", error);
-    alert("台データの保存に失敗しました。入力値または保存容量を確認してください。");
+    alert(`台データの保存に失敗しました。
+${error.name}: ${error.message}
+保存データが大きくなっている可能性があります。CSVバックアップ後、保存データ軽量化を実行してください。`);
     return;
   }
 
@@ -2780,6 +2875,7 @@ function bindRecords() {
   $("#exportLatestRecordsButton").addEventListener("click", () => exportRecordsCsv("slot-records_latest.csv"));
   $("#exportDatedRecordsButton").addEventListener("click", () => exportRecordsCsv(`slot-records_${formatLocalDate(new Date())}.csv`));
   $("#reevaluateRecordsButton").addEventListener("click", reevaluateSavedRecords);
+  $("#compactRecordsButton")?.addEventListener("click", compactExistingSavedRecords);
   $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
   $("#bulkAddTagButton").addEventListener("click", () => bulkUpdateMemoTags("add"));
   $("#bulkRemoveTagButton").addEventListener("click", () => bulkUpdateMemoTags("remove"));
@@ -2787,7 +2883,7 @@ function bindRecords() {
     if (!confirm("保存データをすべて削除しますか？")) return;
     state.records = [];
     state.editingRecordId = null;
-    saveJson(STORAGE_KEYS.records, state.records);
+    saveRecords();
     renderAll();
   });
 }
@@ -2975,7 +3071,7 @@ function saveRecordFromRow(id, row) {
 
   state.records[index] = updated;
   saveStoreName(updated.store);
-  saveJson(STORAGE_KEYS.records, state.records);
+  saveRecords();
   state.editingRecordId = null;
   renderAll();
 }
@@ -2991,7 +3087,7 @@ function editRecord(id) {
 function deleteRecord(id) {
   if (!confirm("このデータを削除しますか？")) return;
   state.records = state.records.filter((item) => item.id !== id);
-  saveJson(STORAGE_KEYS.records, state.records);
+  saveRecords();
   renderAll();
 }
 
@@ -4217,10 +4313,18 @@ function evaluateRecord(record) {
   };
 }
 
+function getMachineMasters() {
+  try {
+    return state.masters || INITIAL_MASTERS;
+  } catch {
+    return INITIAL_MASTERS;
+  }
+}
+
 function findMachineMaster(machineName) {
   const normalizedName = normalizeMachineName(machineName);
   if (!normalizedName) return null;
-  return state.masters.find((master) => normalizeMachineName(master.name) === normalizedName) || null;
+  return getMachineMasters().find((master) => normalizeMachineName(master.name) === normalizedName) || null;
 }
 
 function normalizeMachineName(name) {
@@ -4310,7 +4414,7 @@ function refreshRecordEvaluations() {
     changed = changed || hasReevaluationChange(record, updated);
     return updated;
   });
-  if (changed) saveJson(STORAGE_KEYS.records, state.records);
+  if (changed) saveRecords();
 }
 
 function reevaluateSavedRecords() {
@@ -4347,7 +4451,7 @@ function reevaluateSavedRecords() {
     return updated;
   });
 
-  saveJson(STORAGE_KEYS.records, state.records);
+  saveRecords();
   renderAll();
 
   const ratingSummary = RATING_LABELS.map((label) => `${label} ${ratingCounts[label]}件`).join("、");
@@ -4434,7 +4538,7 @@ function updateMemoTagsForRecords(targets, tags, mode, targetLabel) {
     return { ...record, memo: nextMemo, updatedAt: new Date().toISOString() };
   });
 
-  saveJson(STORAGE_KEYS.records, state.records);
+  saveRecords();
   renderAll();
   alert(`タグ${verb}完了：${changedCount}件`);
 }
@@ -4465,7 +4569,8 @@ function renderAll() {
   renderSummary();
   renderAnalysis();
   renderMasters();
-  $("#storageStatus").textContent = `保存 ${state.records.length}件`;
+  const storageStatus = $("#storageStatus");
+  if (storageStatus) storageStatus.textContent = `保存 ${state.records.length}件 / 使用量 約${getStorageUsageText()}`;
 }
 
 function renderOptions() {
@@ -4936,7 +5041,7 @@ function importRecordsCsv(file) {
   if (!file) return Promise.resolve();
   return file.text().then((text) => {
     const [, ...rows] = parseCsv(text.replace(/^\ufeff/, ""));
-    const importedRecords = rows.map(createRecordFromCsvRow);
+    const importedRecords = hydrateRecords(rows.map(createRecordFromCsvRow));
     const duplicateMap = new Map();
     state.records.forEach((record, index) => {
       const key = buildRecordDuplicateKey(record);
@@ -4975,7 +5080,7 @@ function importRecordsCsv(file) {
       state.records = state.records.filter((_, index) => !duplicateIndexesToRemove.has(index));
     }
 
-    saveJson(STORAGE_KEYS.records, state.records);
+    saveRecords();
     renderAll();
     alert(`CSV取込が完了しました。追加: ${addedCount}件 / 上書き: ${overwrittenCount}件 / 未取込: ${skippedCount}件`);
   });
