@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ジャグラーデータ管理</title>
-  <link rel="manifest" href="manifest.json?v=18">
+  <link rel="manifest" href="manifest.json?v=19">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css?v=18">
+  <link rel="stylesheet" href="styles.css?v=19">
 </head>
 <body>
   <header class="app-header">
@@ -238,6 +238,13 @@
         </label>
         <label class="check"><input type="checkbox" id="filterPositive"> 差枚プラスのみ</label>
         <label class="check"><input type="checkbox" id="filterAOnly"> A評価のみ</label>
+        <label>除外状態
+          <select id="filterArchiveStatus">
+            <option value="active">通常データのみ</option>
+            <option value="archived">除外データのみ</option>
+            <option value="all">すべて</option>
+          </select>
+        </label>
       </div>
 
       <details class="advanced-search">
@@ -248,6 +255,33 @@
           <label>台番号を含む<input id="filterUnitText" placeholder="台番号の一部"></label>
         </div>
       </details>
+
+      <div class="bulk-tag-panel archive-panel">
+        <h3>機種データ整理</h3>
+        <p class="muted">リニューアルや台移動前の過去データを削除せず、各種分析対象から除外します。店舗・機種・基準日・期間条件・台番号範囲で指定できます。</p>
+        <div class="filter-grid">
+          <label>店舗<select id="archiveStore"><option value="">すべて</option></select></label>
+          <label>機種<select id="archiveMachine"><option value="">すべて</option></select></label>
+          <label>基準日<input type="date" id="archiveBaseDate"></label>
+          <label>期間条件
+            <select id="archiveDateMode">
+              <option value="before">基準日以前</option>
+              <option value="after">基準日以後</option>
+              <option value="on">基準日のみ</option>
+              <option value="all">日付指定なし</option>
+            </select>
+          </label>
+          <label>台番号From<input id="archiveUnitFrom" inputmode="numeric" placeholder="例：500"></label>
+          <label>台番号To<input id="archiveUnitTo" inputmode="numeric" placeholder="例：550"></label>
+        </div>
+        <div class="action-row">
+          <button class="secondary" id="previewArchiveButton" type="button">対象件数を確認</button>
+          <button class="danger" id="archiveRecordsButton" type="button">対象を除外</button>
+          <button id="unarchiveFilteredButton" type="button">一覧表示中を除外解除</button>
+          <button class="danger subtle" id="deleteFilteredRecordsButton" type="button">一覧表示中を完全削除</button>
+        </div>
+        <p class="muted" id="archivePreviewText">条件を指定して対象件数を確認してください。</p>
+      </div>
 
       <div class="bulk-tag-panel">
         <label>検索結果に一括操作するメモタグ
@@ -589,6 +623,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js?v=18"></script>
+  <script src="app.js?v=19"></script>
 </body>
 </html>
