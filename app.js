@@ -3024,8 +3024,101 @@ function numberValue(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+
+function isActiveRecord(record) {
+  return record?.archived !== true;
+}
+
+function activeRecords() {
+  return state.records.filter(isActiveRecord);
+}
+
+function getArchiveConditions() {
+  return {
+    store: $("#archiveStore")?.value || "",
+    machine: $("#archiveMachine")?.value || "",
+    baseDate: $("#archiveBaseDate")?.value || "",
+    dateMode: $("#archiveDateMode")?.value || "before",
+    unitFrom: numberValue($("#archiveUnitFrom")?.value),
+    unitTo: numberValue($("#archiveUnitTo")?.value)
+  };
+}
+
+function getArchiveTargetRecords() {
+  const c = getArchiveConditions();
+  const hasUnitRange = c.unitFrom || c.unitTo;
+  const minUnit = hasUnitRange ? Math.min(c.unitFrom || c.unitTo, c.unitTo || c.unitFrom) : null;
+  const maxUnit = hasUnitRange ? Math.max(c.unitFrom || c.unitTo, c.unitTo || c.unitFrom) : null;
+  return state.records.filter((record) => {
+    if (record.archived) return false;
+    if (c.store && record.store !== c.store) return false;
+    if (c.machine && record.machine !== c.machine) return false;
+    if (c.dateMode !== "all") {
+      if (!c.baseDate) return false;
+      if (c.dateMode === "before" && record.date > c.baseDate) return false;
+      if (c.dateMode === "after" && record.date < c.baseDate) return false;
+      if (c.dateMode === "on" && record.date !== c.baseDate) return false;
+    }
+    if (hasUnitRange) {
+      const unit = numberValue(record.unit);
+      if (!unit || unit < minUnit || unit > maxUnit) return false;
+    }
+    return true;
+  });
+}
+
+function previewArchiveTargets() {
+  const target = $("#archivePreviewText");
+  if (!target) return;
+  target.textContent = `除外対象候補：${getArchiveTargetRecords().length}件`;
+}
+
+async function archiveMatchingRecords() {
+  const targets = getArchiveTargetRecords();
+  if (!targets.length) return alert("除外対象がありません。");
+  if (!confirm(`${targets.length}件を「リニューアルによる台移動」として除外しますか？`)) return;
+  const ids = new Set(targets.map((r) => r.id));
+  const now = new Date().toISOString();
+  const prev = state.records;
+  state.records = state.records.map((record) => ids.has(record.id) ? { ...record, archived: true, archiveReason: "リニューアルによる台移動", archivedAt: now, updatedAt: now } : record);
+  try { await saveRecords(); } catch (error) { state.records = prev; alert(`除外保存に失敗しました。\n${error.name}: ${error.message}`); return; }
+  renderAll();
+  alert(`除外しました：${targets.length}件`);
+}
+
+async function unarchiveRecords(records) {
+  const targets = records.filter((record) => record.archived);
+  if (!targets.length) return alert("除外解除対象がありません。");
+  if (!confirm(`${targets.length}件の除外を解除しますか？`)) return;
+  const ids = new Set(targets.map((r) => r.id));
+  const prev = state.records;
+  state.records = state.records.map((record) => ids.has(record.id) ? { ...record, archived: undefined, archiveReason: undefined, archivedAt: undefined, updatedAt: new Date().toISOString() } : record);
+  try { await saveRecords(); } catch (error) { state.records = prev; alert(`除外解除に失敗しました。\n${error.name}: ${error.message}`); return; }
+  renderAll();
+}
+
+function exportRecordsJson(filename, records) {
+  const blob = new Blob([JSON.stringify(records.map(compactRecordForStorage), null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url; anchor.download = filename; anchor.click(); URL.revokeObjectURL(url);
+}
+
+async function deleteFilteredRecordsWithBackup() {
+  const targets = getFilteredRecords();
+  if (!targets.length) return alert("完全削除対象がありません。");
+  if (!confirm(`${targets.length}件を完全削除します。先にJSONバックアップを出力しますか？`)) return;
+  exportRecordsJson(`slot-records_backup_${todayString()}.json`, targets);
+  if (!confirm("バックアップの保存を確認してからOKしてください。完全削除後は元に戻せません。")) return;
+  const ids = new Set(targets.map((r) => r.id));
+  const prev = state.records;
+  state.records = state.records.filter((record) => !ids.has(record.id));
+  try { await saveRecords(); } catch (error) { state.records = prev; alert(`完全削除に失敗しました。\n${error.name}: ${error.message}`); return; }
+  renderAll();
+}
+
 function bindRecords() {
-  ["filterDate", "filterStore", "filterMachine", "filterUnit", "filterRating", "filterMemoTag", "filterPositive", "filterAOnly", "filterStoreText", "filterMachineText", "filterUnitText"].forEach((id) => {
+  ["filterDate", "filterStore", "filterMachine", "filterUnit", "filterRating", "filterMemoTag", "filterPositive", "filterAOnly", "filterArchiveStatus", "filterStoreText", "filterMachineText", "filterUnitText"].forEach((id) => {
     const element = $(`#${id}`);
     if (!element) return;
     element.addEventListener("input", () => {
@@ -3048,8 +3141,20 @@ function bindRecords() {
   $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
   $("#bulkAddTagButton").addEventListener("click", () => bulkUpdateMemoTags("add"));
   $("#bulkRemoveTagButton").addEventListener("click", () => bulkUpdateMemoTags("remove"));
+  $("#previewArchiveButton")?.addEventListener("click", previewArchiveTargets);
+  $("#archiveRecordsButton")?.addEventListener("click", archiveMatchingRecords);
+  $("#unarchiveFilteredButton")?.addEventListener("click", () => unarchiveRecords(getFilteredRecords()));
+  $("#deleteFilteredRecordsButton")?.addEventListener("click", deleteFilteredRecordsWithBackup);
+  ["archiveStore", "archiveMachine", "archiveBaseDate", "archiveDateMode", "archiveUnitFrom", "archiveUnitTo"].forEach((id) => {
+    const element = $("#" + id);
+    if (!element) return;
+    element.addEventListener("input", previewArchiveTargets);
+    element.addEventListener("change", previewArchiveTargets);
+  });
   $("#deleteAllRecordsButton").addEventListener("click", async () => {
-    if (!confirm("保存データをすべて削除しますか？")) return;
+    if (!confirm("保存データをすべて完全削除します。先にJSONバックアップを出力しますか？")) return;
+    exportRecordsJson(`slot-records_all_backup_${todayString()}.json`, state.records);
+    if (!confirm("バックアップの保存を確認してからOKしてください。完全削除後は元に戻せません。")) return;
     const previousRecords = state.records;
     state.records = [];
     state.editingRecordId = null;
@@ -3077,7 +3182,8 @@ function getRecordFilters() {
     rating: $("#filterRating")?.value || "",
     memoTag: $("#filterMemoTag")?.value || "",
     positive: Boolean($("#filterPositive")?.checked),
-    aOnly: Boolean($("#filterAOnly")?.checked)
+    aOnly: Boolean($("#filterAOnly")?.checked),
+    archiveStatus: $("#filterArchiveStatus")?.value || "active"
   };
 }
 
@@ -3086,6 +3192,8 @@ function getFilteredRecords() {
 
   return state.records.filter((record) => {
     if (state.recordsScopeIds && !state.recordsScopeIds.has(record.id)) return false;
+    if (filters.archiveStatus === "active" && record.archived === true) return false;
+    if (filters.archiveStatus === "archived" && record.archived !== true) return false;
     if (filters.date && record.date !== filters.date) return false;
     if (filters.store && record.store !== filters.store) return false;
     if (filters.machine && record.machine !== filters.machine) return false;
@@ -3131,10 +3239,12 @@ function renderRecords() {
     const saveId = button.dataset.save;
     const cancelId = button.dataset.cancel;
     const deleteId = button.dataset.delete;
+    const unarchiveId = button.dataset.unarchive;
     if (editId) startInlineEdit(editId);
     if (saveId) saveInlineRecord(saveId, button.closest("tr"));
     if (cancelId) cancelInlineEdit();
     if (deleteId) deleteRecord(deleteId);
+    if (unarchiveId) unarchiveRecords(state.records.filter((record) => record.id === unarchiveId));
   };
 }
 
@@ -3148,14 +3258,19 @@ function renderReadOnlyRecordRow(record) {
     <td>${record.bb}/${record.rb}</td>
     <td>${rateText(record.totalRate)}</td>
     <td>${formatDiff(record.diff)}</td>
-    <td>${ratingPill(record.rating)}</td>
+    <td>${ratingPill(record.rating)}${archiveBadge(record)}</td>
     <td class="reason-cell">${escapeHtml(record.reason || "")}</td>
     <td class="memo-cell">${escapeHtml(record.memo || "")}</td>
     <td class="row-actions">
       <button class="secondary" data-edit="${record.id}" type="button" title="一覧上で編集">編集</button>
+      ${record.archived ? `<button data-unarchive="${record.id}" type="button" title="除外解除">解除</button>` : ""}
       <button class="danger icon" data-delete="${record.id}" type="button" title="削除">×</button>
     </td>
   `;
+}
+
+function archiveBadge(record) {
+  return record?.archived ? `<span class="archive-badge" title="${escapeHtml(record.archiveReason || "除外中")}">除外中</span>` : "";
 }
 
 function renderDiffEditInput(record) {
@@ -3331,7 +3446,7 @@ function matchesSummaryDateFilters(record, filters) {
 
 function specialFilteredRecords() {
   const filters = getSummaryFilters();
-  return state.records.filter((record) => {
+  return activeRecords().filter((record) => {
     if (!matchesSummaryDateFilters(record, filters)) return false;
     if (filters.store && record.store !== filters.store) return false;
     if (filters.machine && record.machine !== filters.machine) return false;
@@ -3604,7 +3719,7 @@ function getAnalysisRecords() {
   const machine = $("#analysisMachine").value;
   const from = $("#analysisFrom").value;
   const to = $("#analysisTo").value;
-  return state.records.filter((record) => {
+  return activeRecords().filter((record) => {
     if (store && record.store !== store) return false;
     if (machine && record.machine !== machine) return false;
     if (from && record.date < from) return false;
@@ -3628,8 +3743,8 @@ function renderAnalysis() {
 function renderAnalysisOptions() {
   const currentStore = $("#analysisStore").value;
   const currentMachine = $("#analysisMachine").value;
-  const stores = unique(state.records.map((record) => record.store));
-  const machines = unique(state.records.map((record) => record.machine));
+  const stores = unique(activeRecords().map((record) => record.store));
+  const machines = unique(activeRecords().map((record) => record.machine));
   $("#analysisStore").innerHTML = `<option value="">全店舗</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
   $("#analysisMachine").innerHTML = `<option value="">全機種</option>${machines.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
   if (stores.includes(currentStore)) $("#analysisStore").value = currentStore;
@@ -3921,7 +4036,7 @@ function getRecommendationData() {
   const memoTags = getSelectedMemoTags("#recommendMemoTags");
   const target = targetDate ? new Date(`${targetDate}T00:00:00`) : new Date();
 
-  const base = state.records.filter((record) => {
+  const base = activeRecords().filter((record) => {
     if (store && record.store !== store) return false;
     if (machine && record.machine !== machine) return false;
     if (targetDate && record.date >= targetDate) return false;
@@ -4689,6 +4804,9 @@ function renderFilterOptions() {
   renderSelectOptions("#filterStore", stores, "すべて");
   renderSelectOptions("#filterMachine", machines, "すべて");
   renderSelectOptions("#filterUnit", uniqueUnits(candidates.map((record) => record.unit)), "すべて");
+  renderSelectOptions("#archiveStore", unique(state.records.map((record) => record.store)), "すべて");
+  renderSelectOptions("#archiveMachine", unique(state.records.map((record) => record.machine)), "すべて");
+  previewArchiveTargets();
 }
 
 function renderSelectOptions(selector, values, emptyLabel = "すべて") {
@@ -4760,7 +4878,7 @@ async function updateMemoTagsForRecords(targets, tags, mode, targetLabel) {
 function renderSummaryFilterOptions() {
   if (!$("#specialStore")) return;
   const filters = getSummaryFilters();
-  const dateFiltered = state.records.filter((record) => matchesSummaryDateFilters(record, filters));
+  const dateFiltered = activeRecords().filter((record) => matchesSummaryDateFilters(record, filters));
   const stores = unique(dateFiltered.map((record) => record.store));
   const selectedStore = stores.includes(filters.store) ? filters.store : "";
   const machines = unique(dateFiltered
@@ -4788,7 +4906,7 @@ function renderAll() {
 function renderOptions() {
   const stores = unique(state.stores);
   const machines = unique([
-    ...state.records.map((record) => String(record.machine || "").trim()),
+    ...activeRecords().map((record) => String(record.machine || "").trim()),
     ...state.masters.map((master) => String(master.name || "").trim())
   ]);
   const memoTags = normalizeMemoTags(state.memoTags);
@@ -4823,7 +4941,7 @@ function renderRecommendStoreSelectOptions() {
   const select = $("#recommendStoreSelect");
   if (!select) return;
   const stores = unique([
-    ...state.records.map((record) => String(record.store || "").trim()),
+    ...activeRecords().map((record) => String(record.store || "").trim()),
     ...state.stores.map((store) => String(store || "").trim())
   ]);
   select.innerHTML = `<option value="">全店舗</option>${stores.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
@@ -4835,10 +4953,10 @@ function renderRecommendMachineSelectOptions() {
   if (!select) return;
   const store = $("#recommendStore")?.value.trim() || "";
   const allMachines = unique([
-    ...state.records.map((record) => String(record.machine || "").trim()),
+    ...activeRecords().map((record) => String(record.machine || "").trim()),
     ...state.masters.map((master) => String(master.name || "").trim())
   ]);
-  const storeMachines = store ? unique(state.records
+  const storeMachines = store ? unique(activeRecords()
     .filter((record) => record.store === store)
     .map((record) => String(record.machine || "").trim())) : [];
   const machines = store
@@ -4934,11 +5052,11 @@ function escapeHtml(value) {
 }
 
 function recordsToCsv(records) {
-  const headers = ["日付", "店舗名", "機種名", "台番号", "累計ゲーム数", "BB回数", "RB回数", "BB確率", "RB確率", "合算確率", "推定差枚", "評価", "高設定期待度", "信頼度", "評価理由", "近い設定候補", "メモ", "登録日時"];
+  const headers = ["日付", "店舗名", "機種名", "台番号", "累計ゲーム数", "BB回数", "RB回数", "BB確率", "RB確率", "合算確率", "推定差枚", "評価", "高設定期待度", "信頼度", "評価理由", "近い設定候補", "メモ", "登録日時", "除外", "除外理由", "除外日時"];
   const rows = records.map((record) => [
     record.date, record.store, record.machine, record.unit, record.games, record.bb, record.rb,
     record.bbRate, record.rbRate, record.totalRate, record.diff, record.rating, record.expectation,
-    record.confidence, record.reason, record.nearestSettings, record.memo, record.createdAt
+    record.confidence, record.reason, record.nearestSettings, record.memo, record.createdAt, record.archived ? "true" : "", record.archiveReason || "", record.archivedAt || ""
   ]);
   return toCsv([headers, ...rows]);
 }
@@ -5227,7 +5345,10 @@ function createRecordFromCsvRow(row) {
     reason: row[14] || "",
     nearestSettings: row[15] || "-",
     memo: row[16] || "",
-    createdAt: row[17] || new Date().toISOString()
+    createdAt: row[17] || new Date().toISOString(),
+    archived: row[18] === "true" || row[18] === "1" || row[18] === "除外",
+    archiveReason: row[19] || undefined,
+    archivedAt: row[20] || undefined
   };
 }
 
