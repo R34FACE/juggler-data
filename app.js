@@ -36,7 +36,11 @@ const state = {
   ocrPreview: { files: [], settings: [], currentIndex: 0, image: null, mode: "tableOnly" },
   editingRecordId: null,
   recordsScopeIds: null,
-  suppressRecordFilterClear: false
+  suppressRecordFilterClear: false,
+  recordsStorageReady: false,
+  recordsStorageDiagnostic: null,
+  emergencyRescueResults: [],
+  emergencyRuntimeInfo: null
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -56,16 +60,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindRecommendations();
   bindMasters();
   updateStorageStatus("保存データ読込中 / IndexedDB保存");
+  setRecordsStorageActionsDisabled(true);
 
+  let storageInitialized = false;
   try {
     await requestPersistentStorage();
-    await initializeRecordsStorage();
+    const storageResult = await initializeRecordsStorage();
+    showRecordsStorageStartupResult(storageResult);
+    storageInitialized = true;
   } catch (error) {
     console.error("保存データ初期化エラー:", error);
-    alert(`保存データの読み込みに失敗しました。\n${error.name}: ${error.message}`);
+    alert(`保存データの読み込みに失敗しました。\n${error.name}: ${error.message}\nサイトデータを削除せず、現在の状態を維持してください。`);
   }
 
-  refreshRecordEvaluations();
+  if (storageInitialized) {
+    state.recordsStorageReady = true;
+    setRecordsStorageActionsDisabled(false);
+    refreshRecordEvaluations();
+  }
   addDraftRow();
   renderAll();
 });
@@ -224,13 +236,61 @@ function saveRecordsToDb(records) {
   });
 }
 
+function mergeRecordsById(...recordGroups) {
+  return mergeRecoveredRecords([], recordGroups.flat());
+}
+
+function recordNaturalKey(record) {
+  return [record.date || "", record.store || "", record.machine || "", record.unit || ""].map((value) => String(value).trim()).join("__");
+}
+
+function recordInformationScore(record) {
+  return Number(record.games || 0) + Number(record.bb || 0) + Number(record.rb || 0) + Math.abs(Number(record.diff || 0)) + String(record.memo || "").length;
+}
+
+function chooseBetterRecord(previous, record) {
+  const previousUpdated = Date.parse(previous.updatedAt || previous.createdAt || "");
+  const currentUpdated = Date.parse(record.updatedAt || record.createdAt || "");
+  if (Number.isFinite(previousUpdated) && Number.isFinite(currentUpdated) && previousUpdated !== currentUpdated) {
+    return currentUpdated > previousUpdated ? { ...previous, ...record } : previous;
+  }
+  return recordInformationScore(record) >= recordInformationScore(previous) ? { ...previous, ...record } : previous;
+}
+
+function mergeRecoveredRecords(current, recovered) {
+  const byId = new Map();
+  const withoutId = [];
+
+  [...current, ...recovered].filter(Boolean).forEach((rawRecord) => {
+    const record = { ...rawRecord, id: rawRecord.id || uid("recovered") };
+    if (rawRecord.id) {
+      const previous = byId.get(record.id);
+      byId.set(record.id, previous ? chooseBetterRecord(previous, record) : record);
+    } else {
+      withoutId.push(record);
+    }
+  });
+
+  const byNaturalKey = new Map();
+  [...byId.values(), ...withoutId].forEach((record) => {
+    const key = recordNaturalKey(record);
+    const previous = byNaturalKey.get(key);
+    byNaturalKey.set(key, previous ? chooseBetterRecord(previous, record) : record);
+  });
+
+  return [...byNaturalKey.values()];
+}
+
 function deleteRecordFromDb(id) {
   return withRecordsStore("readwrite", (store) => {
     store.delete(id);
   });
 }
 
-function replaceRecordsInDb(records) {
+function replaceRecordsInDb(records, options = {}) {
+  if (!options.allowEmpty && (!Array.isArray(records) || records.length === 0)) {
+    throw new Error("空データによるIndexedDB全置換を防止しました。");
+  }
   return withRecordsStore("readwrite", (store) => {
     store.clear();
     records.map(compactRecordForStorage).forEach((record) => store.put(record));
@@ -243,36 +303,483 @@ function clearRecordsDb() {
   });
 }
 
+function loadLocalRecordArray(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.error(`${key} 読み込みエラー`, error);
+    return [];
+  }
+}
+
+async function inspectRecordsStorage() {
+  const indexedDbRecords = await loadRecordsFromDb();
+  const localRecords = loadLocalRecordArray(STORAGE_KEYS.records);
+  const backupRecords = loadLocalRecordArray(MIGRATED_RECORDS_BACKUP_KEY);
+  return {
+    indexedDbRecords,
+    localRecords,
+    backupRecords,
+    indexedDbCount: indexedDbRecords.length,
+    localCount: localRecords.length,
+    backupCount: backupRecords.length
+  };
+}
+
+function bestRecoveryCandidate(status) {
+  return [
+    { name: "IndexedDB", records: status.indexedDbRecords },
+    { name: "旧localStorage", records: status.localRecords },
+    { name: "移行バックアップ", records: status.backupRecords }
+  ].filter((item) => Array.isArray(item.records) && item.records.length > 0)
+    .sort((a, b) => b.records.length - a.records.length)[0] || null;
+}
+
 async function migrateLocalStorageRecordsToIndexedDb() {
   const raw = localStorage.getItem(STORAGE_KEYS.records);
   if (!raw) return 0;
 
-  const parsed = loadJson(STORAGE_KEYS.records, []);
-  if (!Array.isArray(parsed) || !parsed.length) {
-    localStorage.removeItem(STORAGE_KEYS.records);
-    return 0;
-  }
+  const parsed = loadLocalRecordArray(STORAGE_KEYS.records);
+  if (!parsed.length) return 0;
 
-  const compact = parsed.map(compactRecordForStorage);
-  await saveRecordsToDb(compact);
+  const before = await loadRecordsFromDb();
+  const merged = mergeRecordsById(before, parsed);
+  await saveRecordsToDb(merged);
+  const verified = await loadRecordsFromDb();
+  const indexedOk = verified.length >= parsed.length;
 
+  let backupOk = false;
   try {
     localStorage.setItem(MIGRATED_RECORDS_BACKUP_KEY, raw);
+    backupOk = localStorage.getItem(MIGRATED_RECORDS_BACKUP_KEY) === raw;
   } catch (error) {
     console.warn("移行済みlocalStorageバックアップの作成に失敗しました:", error);
   }
-  localStorage.removeItem(STORAGE_KEYS.records);
-  alert(`localStorageの保存データをIndexedDBへ移行しました。対象 ${compact.length}件`);
-  return compact.length;
+
+  if (indexedOk && backupOk) {
+    localStorage.removeItem(STORAGE_KEYS.records);
+    alert(`localStorageの保存データをIndexedDBへ移行しました。対象 ${parsed.length}件。移行バックアップは保持しています。`);
+  } else {
+    console.warn("localStorage移行の安全確認に失敗したため旧データを保持しました", { indexedOk, backupOk, source: parsed.length, indexedDb: verified.length });
+  }
+  return parsed.length;
 }
 
 async function initializeRecordsStorage() {
-  await migrateLocalStorageRecordsToIndexedDb();
-  const records = await loadRecordsFromDb();
-  state.records = hydrateRecords(records);
+  const status = await inspectRecordsStorage();
+  state.recordsStorageDiagnostic = status;
+  console.log("保存データ診断", { indexedDb: status.indexedDbCount, localStorage: status.localCount, migratedBackup: status.backupCount });
+  state.records = hydrateRecords(status.indexedDbRecords);
+
+  const best = bestRecoveryCandidate(status);
+  return {
+    restored: false,
+    source: status.indexedDbCount > 0 ? "IndexedDB" : best?.name || "",
+    count: status.indexedDbCount,
+    candidateSource: best?.name || "",
+    candidateCount: best?.records.length || 0,
+    diagnostic: status
+  };
+}
+
+function showRecordsStorageStartupResult(result) {
+  if (!result?.diagnostic) return;
+  const status = result.diagnostic;
+  const action = result.count > 0
+    ? `IndexedDBの${result.count}件を読み込みました。`
+    : result.candidateCount > 0
+      ? `${result.candidateSource}に${result.candidateCount}件の復旧候補があります。一覧ページの復旧ボタンを押すまで保存先は変更しません。`
+      : "復旧候補は見つかりませんでした。";
+  alert(`保存データ確認結果
+IndexedDB：${status.indexedDbCount}件
+旧localStorage：${status.localCount}件
+移行バックアップ：${status.backupCount}件
+${action}`);
+}
+
+function ensureRecordsStorageReady() {
+  if (state.recordsStorageReady) return true;
+  alert("保存データを読み込み中です。少し待ってから再度操作してください。");
+  return false;
+}
+
+function setRecordsStorageActionsDisabled(disabled) {
+  ["#saveDraftButton", "#deleteAllRecordsButton", "#compactRecordsButton", "#importRecordsInput", "#importRecordsJsonInput", "#archiveRecordsButton", "#unarchiveFilteredButton", "#deleteFilteredRecordsButton", "#reevaluateRecordsButton"].forEach((selector) => {
+    const element = $(selector);
+    if (element) element.disabled = disabled;
+  });
+}
+
+async function recoverRecordsFromBestCandidate() {
+  if (!ensureRecordsStorageReady()) return;
+  try {
+    const status = await inspectRecordsStorage();
+    const best = bestRecoveryCandidate(status);
+    renderRecordsRecoveryStatus(status, best);
+    if (!best) return alert("復旧できる非空データがありません。");
+    const merged = status.indexedDbCount > 0 ? mergeRecordsById(status.indexedDbRecords, best.records) : best.records;
+    await saveRecordsToDb(merged);
+    const verified = await loadRecordsFromDb();
+    if (verified.length < best.records.length) throw new Error(`復旧件数の確認に失敗しました。復旧元${best.records.length}件、IndexedDB${verified.length}件`);
+    state.records = hydrateRecords(verified);
+    renderAll();
+    await refreshStorageStatus();
+    alert(`${best.name}から${verified.length}件を復旧しました。移行バックアップは削除していません。`);
+  } catch (error) {
+    console.error("保存データ復旧エラー:", error);
+    alert(`保存データ復旧に失敗しました。\n${error.name}: ${error.message}\nサイトデータを削除せず、現在の状態を維持してください。`);
+  }
+}
+
+async function inspectRecordsForRecovery() {
+  if (!ensureRecordsStorageReady()) return;
+  try {
+    const status = await inspectRecordsStorage();
+    renderRecordsRecoveryStatus(status, bestRecoveryCandidate(status));
+  } catch (error) {
+    alert(`保存データ診断に失敗しました。\n${error.name}: ${error.message}`);
+  }
+}
+
+function renderRecordsRecoveryStatus(status, best) {
+  const target = $("#recordsRecoveryStatus");
+  if (!target) return;
+  target.innerHTML = `<strong>保存データ確認結果</strong><br>IndexedDB：${status.indexedDbCount}件<br>旧localStorage：${status.localCount}件<br>移行バックアップ：${status.backupCount}件${best ? `<br><button id="recoverBestRecordsButton" type="button">${escapeHtml(best.name)}から${best.records.length}件を復旧する</button>` : "<br>復旧候補はありません。"}`;
+  $("#recoverBestRecordsButton")?.addEventListener("click", recoverRecordsFromBestCandidate);
+}
+
+function looksLikeSlotRecord(value) {
+  if (!value || typeof value !== "object") return false;
+  const fields = ["date", "store", "machine", "unit", "games", "bb", "rb", "diff"];
+  return fields.filter((field) => Object.prototype.hasOwnProperty.call(value, field)).length >= 5;
+}
+
+function extractPossibleRecords(value) {
+  if (Array.isArray(value)) {
+    const direct = value.filter(looksLikeSlotRecord);
+    if (direct.length) return direct;
+    return value.flatMap(extractPossibleRecords);
+  }
+  if (!value || typeof value !== "object") return [];
+  if (looksLikeSlotRecord(value)) return [value];
+
+  const preferredKeys = ["records", "data", "items", "slotRecords", "savedRecords", "backup"];
+  const records = [];
+  preferredKeys.forEach((key) => {
+    if (value[key] !== undefined) records.push(...extractPossibleRecords(value[key]));
+  });
+  Object.entries(value).forEach(([key, child]) => {
+    if (preferredKeys.includes(key)) return;
+    records.push(...extractPossibleRecords(child));
+  });
+  return records;
+}
+
+function byteLengthOfText(text) {
+  return new Blob([text]).size;
+}
+
+function inspectAllLocalStorageKeys() {
+  const results = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (!key) continue;
+    const raw = localStorage.getItem(key);
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw);
+      const candidates = extractPossibleRecords(parsed);
+      results.push({
+        sourceType: "localStorage",
+        localStorageKey: key,
+        key,
+        byteLength: byteLengthOfText(raw),
+        rawCount: Array.isArray(parsed) ? parsed.length : 1,
+        count: candidates.length,
+        validRecords: candidates,
+        sample: candidates.slice(0, 3),
+        note: candidates.length ? "台データ候補あり" : "台データ候補なし"
+      });
+    } catch {
+      results.push({ sourceType: "localStorage", localStorageKey: key, key, byteLength: byteLengthOfText(raw), rawCount: 0, count: 0, validRecords: [], sample: [], note: "JSONではありません" });
+    }
+  }
+  return results;
+}
+
+async function listIndexedDbDatabases() {
+  if (typeof indexedDB.databases === "function") return indexedDB.databases();
+  return [
+    { name: "jugglerDataDb" },
+    { name: "juggler-data" },
+    { name: "jugglerData" },
+    { name: "slotDataDb" },
+    { name: "slotRecordsDb" }
+  ];
+}
+
+function openExistingDatabase(name) {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(name);
+    let createdDuringScan = false;
+    request.onupgradeneeded = () => {
+      createdDuringScan = true;
+      request.transaction?.abort();
+    };
+    request.onsuccess = () => {
+      if (createdDuringScan) {
+        request.result.close();
+        resolve(null);
+        return;
+      }
+      resolve(request.result);
+    };
+    request.onerror = () => {
+      if (createdDuringScan || request.error?.name === "AbortError") {
+        resolve(null);
+        return;
+      }
+      reject(request.error || new Error(`${name}を開けませんでした。`));
+    };
+  });
+}
+
+function inspectIndexedDbStore(db, storeName) {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(storeName, "readonly");
+    const store = transaction.objectStore(storeName);
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const values = request.result || [];
+      const records = extractPossibleRecords(values);
+      resolve({
+        sourceType: "IndexedDB",
+        databaseName: db.name,
+        databaseVersion: db.version,
+        storeName,
+        rawCount: values.length,
+        count: records.length,
+        validRecords: records,
+        sample: records.slice(0, 3),
+        note: records.length ? "台データ候補あり" : "台データ候補なし"
+      });
+    };
+    request.onerror = () => reject(request.error || new Error(`${storeName}を読み込めませんでした。`));
+  });
+}
+
+async function inspectAllIndexedDbData() {
+  const databases = await listIndexedDbDatabases();
+  const results = [];
+  for (const info of databases) {
+    if (!info?.name) continue;
+    let db = null;
+    try {
+      db = await openExistingDatabase(info.name);
+      if (!db) continue;
+      for (const storeName of [...db.objectStoreNames]) {
+        try {
+          results.push(await inspectIndexedDbStore(db, storeName));
+        } catch (error) {
+          results.push({ sourceType: "IndexedDB", databaseName: db.name, databaseVersion: db.version, storeName, rawCount: 0, count: 0, validRecords: [], sample: [], note: `${error.name}: ${error.message}` });
+        }
+      }
+    } catch (error) {
+      results.push({ sourceType: "IndexedDB", databaseName: info.name, rawCount: 0, count: 0, validRecords: [], sample: [], note: `${error.name}: ${error.message}` });
+    } finally {
+      db?.close();
+    }
+  }
+  return results;
+}
+
+async function getRuntimeStorageInfo() {
+  return {
+    origin: location.origin,
+    href: location.href,
+    userAgent: navigator.userAgent,
+    standalone: window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true,
+    referrer: document.referrer || "",
+    persisted: navigator.storage?.persisted ? await navigator.storage.persisted() : null
+  };
+}
+
+function summarizeRescueResult(result) {
+  const dates = result.validRecords.map((record) => record.date).filter(Boolean).sort();
+  return {
+    oldestDate: dates[0] || "-",
+    latestDate: dates[dates.length - 1] || "-",
+    stores: unique(result.validRecords.map((record) => record.store)).slice(0, 3).join("、") || "-",
+    machines: unique(result.validRecords.map((record) => record.machine)).slice(0, 3).join("、") || "-",
+    units: uniqueUnits(result.validRecords.map((record) => record.unit)).slice(0, 5).join("、") || "-"
+  };
+}
+
+async function scanAllStorageForEmergencyRescue() {
+  const target = $("#emergencyRescueStatus");
+  if (target) target.textContent = "全保存領域を読み取り専用でスキャン中です。保存先は変更しません。";
+  try {
+    const [runtimeInfo, localResults, indexedResults] = await Promise.all([
+      getRuntimeStorageInfo(),
+      Promise.resolve(inspectAllLocalStorageKeys()),
+      inspectAllIndexedDbData()
+    ]);
+    state.emergencyRuntimeInfo = runtimeInfo;
+    state.emergencyRescueResults = [...indexedResults, ...localResults].map((result, index) => ({ ...result, rescueIndex: index }));
+    renderEmergencyRescueResults();
+  } catch (error) {
+    console.error("緊急データ救出スキャンエラー:", error);
+    if (target) target.textContent = `スキャンに失敗しました。${error.name}: ${error.message}`;
+  }
+}
+
+function renderEmergencyRescueResults() {
+  const target = $("#emergencyRescueStatus");
+  if (!target) return;
+  const results = state.emergencyRescueResults || [];
+  const runtime = state.emergencyRuntimeInfo;
+  const candidateResults = results.filter((result) => result.count > 0);
+  const runtimeHtml = runtime ? `<div class="rescue-runtime"><strong>実行環境</strong><br>origin: ${escapeHtml(runtime.origin)}<br>href: ${escapeHtml(runtime.href)}<br>PWA起動: ${runtime.standalone ? "はい" : "いいえ"}<br>永続化: ${runtime.persisted === null ? "不明" : runtime.persisted ? "はい" : "いいえ"}<br>referrer: ${escapeHtml(runtime.referrer || "-")}<br>userAgent: ${escapeHtml(runtime.userAgent)}</div>` : "";
+  if (!results.length) {
+    target.innerHTML = `${runtimeHtml}<p>スキャン結果はありません。</p>`;
+    return;
+  }
+  const rows = results.map((result) => {
+    const summary = summarizeRescueResult(result);
+    const source = result.sourceType === "IndexedDB" ? `${result.databaseName || "-"} / ${result.storeName || "-"}` : result.localStorageKey || result.key || "-";
+    return `<tr>
+      <td>${result.count > 0 ? `<input type="radio" name="emergencyRescueSource" value="${result.rescueIndex}">` : ""}</td>
+      <td>${escapeHtml(result.sourceType)}</td>
+      <td>${escapeHtml(source)}</td>
+      <td>${result.rawCount ?? "-"}</td>
+      <td>${result.count}</td>
+      <td>${result.byteLength ? formatStorageBytes(result.byteLength) : "-"}</td>
+      <td>${escapeHtml(summary.oldestDate)}</td>
+      <td>${escapeHtml(summary.latestDate)}</td>
+      <td>${escapeHtml(summary.stores)}</td>
+      <td>${escapeHtml(summary.machines)}</td>
+      <td>${escapeHtml(summary.units)}</td>
+      <td>${escapeHtml(result.note || "")}</td>
+    </tr>`;
+  }).join("");
+  const noCandidates = candidateResults.length ? "" : `<p class="danger-text">このブラウザ・このサイト領域内には復旧可能な台データが見つかりませんでした。<br>別ブラウザ、別PWA、別Chromeプロフィール、またはスマホのダウンロードフォルダにあるCSV・JSONバックアップを確認してください。<br>サイトデータは削除しないでください。</p>`;
+  target.innerHTML = `${runtimeHtml}${noCandidates}<div class="table-wrap"><table class="data-table compact"><thead><tr><th>選択</th><th>保存場所</th><th>DB/ストア/key</th><th>生データ件数</th><th>候補件数</th><th>容量</th><th>最古日</th><th>最新日</th><th>店舗例</th><th>機種例</th><th>台番号例</th><th>メモ</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  const firstCandidate = candidateResults[0];
+  if (firstCandidate) {
+    const radio = target.querySelector(`input[value="${firstCandidate.rescueIndex}"]`);
+    if (radio) radio.checked = true;
+  }
+}
+
+function selectedEmergencyRescueResult() {
+  const selected = document.querySelector('input[name="emergencyRescueSource"]:checked');
+  if (!selected) return null;
+  return state.emergencyRescueResults.find((result) => String(result.rescueIndex) === selected.value) || null;
+}
+
+function buildEmergencyRescuePayload(result) {
+  return {
+    sourceType: result.sourceType,
+    databaseName: result.databaseName || null,
+    storeName: result.storeName || null,
+    localStorageKey: result.localStorageKey || result.key || null,
+    scannedAt: new Date().toISOString(),
+    origin: location.origin,
+    runtime: state.emergencyRuntimeInfo,
+    records: result.validRecords.map(compactRecordForStorage)
+  };
+}
+
+function downloadJson(filename, value) {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadSelectedEmergencyRescueJson() {
+  const result = selectedEmergencyRescueResult();
+  if (result?.count) {
+    downloadJson(`juggler-emergency-rescue_${todayString()}.json`, buildEmergencyRescuePayload(result));
+    return;
+  }
+  if (!state.emergencyRescueResults.length) return alert("先に全保存領域をスキャンしてください。");
+  downloadJson(`juggler-emergency-scan_${todayString()}.json`, {
+    scannedAt: new Date().toISOString(),
+    origin: location.origin,
+    runtime: state.emergencyRuntimeInfo,
+    results: state.emergencyRescueResults.map((item) => ({
+      ...item,
+      validRecords: item.validRecords.map(compactRecordForStorage),
+      sample: (item.sample || []).map(compactRecordForStorage)
+    }))
+  });
+}
+
+function rescueRecordExists(records, sourceRecord) {
+  const id = sourceRecord.id;
+  const natural = recordNaturalKey(sourceRecord);
+  return records.some((record) => (id && record.id === id) || recordNaturalKey(record) === natural);
+}
+
+async function recoverSelectedEmergencyRescueCandidate() {
+  if (!ensureRecordsStorageReady()) return;
+  const result = selectedEmergencyRescueResult();
+  if (!result || !result.count) return alert("復旧する候補を選択してください。");
+  downloadJson(`juggler-emergency-rescue_${todayString()}.json`, buildEmergencyRescuePayload(result));
+  if (!confirm(`${result.count}件の救出候補を現在のIndexedDBへ追加・統合します。IndexedDBのclearやlocalStorage削除は行いません。続行しますか？`)) return;
+  try {
+    const before = await loadRecordsFromDb();
+    const merged = mergeRecoveredRecords(before, result.validRecords);
+    await saveRecordsToDb(merged);
+    const verified = await loadRecordsFromDb();
+    const representative = result.validRecords[0];
+    const success = result.validRecords.length > 0 && verified.length >= before.length && rescueRecordExists(verified, representative);
+    if (!success) throw new Error(`復旧検証に失敗しました。復旧前${before.length}件、復旧後${verified.length}件`);
+    state.records = hydrateRecords(verified);
+    if (!state.records.length) throw new Error("復旧後の表示データが0件です。");
+    renderAll();
+    await refreshStorageStatus();
+    alert(`緊急データ救出が完了しました。現在のIndexedDB：${verified.length}件`);
+  } catch (error) {
+    console.error("緊急データ救出エラー:", error);
+    alert(`緊急データ救出に失敗しました。\n${error.name}: ${error.message}\nサイトデータを削除せず、現在の状態を維持してください。`);
+  }
+}
+
+function importRecordsJson(file) {
+  if (!ensureRecordsStorageReady()) return Promise.resolve();
+  if (!file) return Promise.resolve();
+  return file.text().then(async (text) => {
+    try {
+      const parsed = JSON.parse(text.replace(/^\ufeff/, ""));
+      const records = hydrateRecords(extractPossibleRecords(parsed));
+      if (!records.length) return alert("JSON内に復元可能な台データが見つかりませんでした。");
+      const previousRecords = state.records;
+      state.records = hydrateRecords(mergeRecoveredRecords(state.records, records));
+      try {
+        await saveRecords();
+        renderAll();
+        alert(`JSON復元が完了しました。候補 ${records.length}件 / 保存 ${state.records.length}件`);
+      } catch (error) {
+        state.records = previousRecords;
+        throw error;
+      }
+    } catch (error) {
+      console.error("JSON復元エラー:", error);
+      alert(`JSON復元に失敗しました。\n${error.name}: ${error.message}`);
+    }
+  });
 }
 
 async function saveRecords() {
+  if (!ensureRecordsStorageReady()) throw new Error("保存データを読み込み中です。");
   await replaceRecordsInDb(state.records);
 }
 
@@ -325,6 +832,8 @@ async function refreshStorageStatus() {
 }
 
 async function compactExistingSavedRecords() {
+  if (!ensureRecordsStorageReady()) return;
+  if (!state.records.length) return alert("軽量化する保存データがありません。");
   if (!confirm("保存データを軽量化します。実行前にCSVバックアップをおすすめします。続行しますか？")) return;
 
   try {
@@ -2870,6 +3379,7 @@ function isDraftRowEmpty(row) {
 }
 
 async function saveDraftRows() {
+  if (!ensureRecordsStorageReady()) return;
   console.log("saveDraftRows start");
 
   const date = $("#inputDate")?.value || "";
@@ -3074,6 +3584,7 @@ function previewArchiveTargets() {
 }
 
 async function archiveMatchingRecords() {
+  if (!ensureRecordsStorageReady()) return;
   const targets = getArchiveTargetRecords();
   if (!targets.length) return alert("除外対象がありません。");
   if (!confirm(`${targets.length}件を「リニューアルによる台移動」として除外しますか？`)) return;
@@ -3087,6 +3598,7 @@ async function archiveMatchingRecords() {
 }
 
 async function unarchiveRecords(records) {
+  if (!ensureRecordsStorageReady()) return;
   const targets = records.filter((record) => record.archived);
   if (!targets.length) return alert("除外解除対象がありません。");
   if (!confirm(`${targets.length}件の除外を解除しますか？`)) return;
@@ -3105,6 +3617,7 @@ function exportRecordsJson(filename, records) {
 }
 
 async function deleteFilteredRecordsWithBackup() {
+  if (!ensureRecordsStorageReady()) return;
   const targets = getFilteredRecords();
   if (!targets.length) return alert("完全削除対象がありません。");
   if (!confirm(`${targets.length}件を完全削除します。先にJSONバックアップを出力しますか？`)) return;
@@ -3137,8 +3650,13 @@ function bindRecords() {
   $("#exportLatestRecordsButton").addEventListener("click", () => exportRecordsCsv("slot-records_latest.csv"));
   $("#exportDatedRecordsButton").addEventListener("click", () => exportRecordsCsv(`slot-records_${formatLocalDate(new Date())}.csv`));
   $("#reevaluateRecordsButton").addEventListener("click", reevaluateSavedRecords);
+  $("#inspectRecordsStorageButton")?.addEventListener("click", inspectRecordsForRecovery);
   $("#compactRecordsButton")?.addEventListener("click", compactExistingSavedRecords);
   $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
+  $("#importRecordsJsonInput")?.addEventListener("change", (event) => importRecordsJson(event.target.files[0]));
+  $("#scanAllStorageButton")?.addEventListener("click", scanAllStorageForEmergencyRescue);
+  $("#downloadRescueJsonButton")?.addEventListener("click", downloadSelectedEmergencyRescueJson);
+  $("#recoverEmergencyCandidateButton")?.addEventListener("click", recoverSelectedEmergencyRescueCandidate);
   $("#bulkAddTagButton").addEventListener("click", () => bulkUpdateMemoTags("add"));
   $("#bulkRemoveTagButton").addEventListener("click", () => bulkUpdateMemoTags("remove"));
   $("#previewArchiveButton")?.addEventListener("click", previewArchiveTargets);
@@ -3152,6 +3670,7 @@ function bindRecords() {
     element.addEventListener("change", previewArchiveTargets);
   });
   $("#deleteAllRecordsButton").addEventListener("click", async () => {
+    if (!ensureRecordsStorageReady()) return;
     if (!confirm("保存データをすべて完全削除します。先にJSONバックアップを出力しますか？")) return;
     exportRecordsJson(`slot-records_all_backup_${todayString()}.json`, state.records);
     if (!confirm("バックアップの保存を確認してからOKしてください。完全削除後は元に戻せません。")) return;
@@ -4730,6 +5249,7 @@ function refreshRecordEvaluations() {
 }
 
 async function reevaluateSavedRecords() {
+  if (!ensureRecordsStorageReady()) return;
   const total = state.records.length;
   if (!total) {
     alert("再判定する保存済みデータがありません。");
@@ -5371,6 +5891,7 @@ function chooseDuplicateImportAction(duplicateCount) {
 }
 
 function importRecordsCsv(file) {
+  if (!ensureRecordsStorageReady()) return Promise.resolve();
   if (!file) return Promise.resolve();
   return file.text().then((text) => {
     const [, ...rows] = parseCsv(text.replace(/^\ufeff/, ""));
