@@ -1058,3 +1058,18 @@ button:disabled {
 .storage-recovery-panel button {
   margin-top: 8px;
 }
+
+.emergency-rescue-panel h3 {
+  margin-top: 0;
+}
+
+.rescue-runtime {
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+  word-break: break-all;
+}
+
+.danger-text {
+  color: #9b1c1c;
+  font-weight: 700;
+}

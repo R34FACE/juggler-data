@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ジャグラーデータ管理</title>
-  <link rel="manifest" href="manifest.json?v=20">
+  <link rel="manifest" href="manifest.json?v=21">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css?v=20">
+  <link rel="stylesheet" href="styles.css?v=21">
 </head>
 <body>
   <header class="app-header">
@@ -301,9 +301,20 @@
         <button class="secondary" id="compactRecordsButton" type="button">保存データを軽量化</button>
         <button class="secondary" id="inspectRecordsStorageButton" type="button">保存データを復旧</button>
         <label class="file-button">CSV取込<input type="file" id="importRecordsInput" accept=".csv,text/csv"></label>
+        <label class="file-button">JSON復元<input type="file" id="importRecordsJsonInput" accept=".json,application/json"></label>
         <button class="danger subtle" id="deleteAllRecordsButton" type="button">全削除</button>
       </div>
       <div class="storage-recovery-panel" id="recordsRecoveryStatus">保存データ復旧ボタンでIndexedDB・旧localStorage・移行バックアップの件数を確認できます。</div>
+      <div class="storage-recovery-panel emergency-rescue-panel">
+        <h3>緊急データ救出</h3>
+        <p>全localStorageキーと全IndexedDBを読み取り専用でスキャンします。復旧ボタンを押すまで保存先は変更しません。</p>
+        <div class="action-row">
+          <button class="secondary" id="scanAllStorageButton" type="button">全保存領域をスキャン</button>
+          <button class="secondary" id="downloadRescueJsonButton" type="button">スキャン結果をJSON保存</button>
+          <button id="recoverEmergencyCandidateButton" type="button">選択した候補を復旧</button>
+        </div>
+        <div id="emergencyRescueStatus">未スキャンです。</div>
+      </div>
       <p class="csv-export-note">一覧上で直接編集できます。編集前・一括タグ操作前には、万一に備えてCSVバックアップ（最新版CSV出力）をおすすめします。スマホのブラウザによっては、同名ファイルでも自動上書きされず、(1) 付きで保存される場合があります。</p>
 
       <div class="table-wrap">
@@ -625,6 +636,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js?v=20"></script>
+  <script src="app.js?v=21"></script>
 </body>
 </html>
