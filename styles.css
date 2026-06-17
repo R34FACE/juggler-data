@@ -1044,3 +1044,17 @@ button:disabled {
   padding: 2px 7px;
   white-space: nowrap;
 }
+
+.storage-recovery-panel {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid rgba(0, 139, 118, 0.25);
+  border-radius: 12px;
+  background: rgba(0, 139, 118, 0.08);
+  color: #16443d;
+  line-height: 1.7;
+}
+
+.storage-recovery-panel button {
+  margin-top: 8px;
+}
