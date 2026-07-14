@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ジャグラーデータ管理</title>
-  <link rel="manifest" href="manifest.json?v=21">
+  <link rel="manifest" href="manifest.json?v=22">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css?v=21">
+  <link rel="stylesheet" href="styles.css?v=22">
 </head>
 <body>
   <header class="app-header">
@@ -294,6 +294,24 @@
         <p class="muted">現在の検索結果すべてが対象です。既存メモは上書きせず、タグは「 / 」区切りで追加・削除します。</p>
       </div>
 
+
+      <div class="bulk-tag-panel bulk-edit-panel">
+        <h3>選択データ一括修正</h3>
+        <p class="muted">一覧でチェックした保存済み台データだけを対象に、チェックを入れた項目だけ変更します。一括修正前にCSVバックアップをおすすめします。</p>
+        <div class="bulk-edit-grid">
+          <label class="check"><input type="checkbox" id="bulkEditDateEnabled"> 日付を変更する</label>
+          <label>日付<input type="date" id="bulkEditDate"></label>
+          <label class="check"><input type="checkbox" id="bulkEditStoreEnabled"> 店舗を変更する</label>
+          <label>店舗<input id="bulkEditStore" list="storeList" placeholder="既存店舗から選択または直接入力"></label>
+          <label class="check"><input type="checkbox" id="bulkEditMachineEnabled"> 機種を変更する</label>
+          <label>機種<input id="bulkEditMachine" list="machineList" placeholder="既存機種から選択または直接入力"></label>
+        </div>
+        <div class="action-row">
+          <span class="selection-count" id="bulkEditSelectedCount">選択中：0件</span>
+          <button class="secondary" id="bulkEditSelectedRecordsButton" type="button" disabled>選択データを一括修正</button>
+        </div>
+      </div>
+
       <div class="action-row">
         <button id="exportLatestRecordsButton" type="button">最新版CSV出力</button>
         <button class="secondary" id="exportDatedRecordsButton" type="button">日付付きCSV出力</button>
@@ -321,6 +339,7 @@
         <table class="data-table compact" id="recordsTable">
           <thead>
             <tr>
+              <th class="select-cell"><input type="checkbox" id="selectAllRecordsCheckbox" aria-label="表示中データを全選択"></th>
               <th data-sort="date">日付</th>
               <th data-sort="store">店舗</th>
               <th data-sort="machine">機種</th>
@@ -636,6 +655,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js?v=21"></script>
+  <script src="app.js?v=22"></script>
 </body>
 </html>

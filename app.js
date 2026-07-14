@@ -40,7 +40,8 @@ const state = {
   recordsStorageReady: false,
   recordsStorageDiagnostic: null,
   emergencyRescueResults: [],
-  emergencyRuntimeInfo: null
+  emergencyRuntimeInfo: null,
+  selectedRecordIds: new Set()
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -3636,11 +3637,16 @@ function bindRecords() {
     if (!element) return;
     element.addEventListener("input", () => {
       if (!state.suppressRecordFilterClear) state.recordsScopeIds = null;
+      clearSelectedRecordIds();
       if (["filterDate", "filterStore", "filterMachine"].includes(id)) renderFilterOptions();
       renderRecords();
     });
   });
   $("#recordsTable thead").addEventListener("click", (event) => {
+    if (event.target.closest("#selectAllRecordsCheckbox")) {
+      toggleAllVisibleRecords(event.target.checked);
+      return;
+    }
     const key = event.target.dataset.sort;
     if (!key) return;
     state.sort.direction = state.sort.key === key && state.sort.direction === "asc" ? "desc" : "asc";
@@ -3659,6 +3665,13 @@ function bindRecords() {
   $("#recoverEmergencyCandidateButton")?.addEventListener("click", recoverSelectedEmergencyRescueCandidate);
   $("#bulkAddTagButton").addEventListener("click", () => bulkUpdateMemoTags("add"));
   $("#bulkRemoveTagButton").addEventListener("click", () => bulkUpdateMemoTags("remove"));
+  $("#bulkEditSelectedRecordsButton")?.addEventListener("click", bulkEditSelectedRecords);
+  ["bulkEditDateEnabled", "bulkEditStoreEnabled", "bulkEditMachineEnabled", "bulkEditDate", "bulkEditStore", "bulkEditMachine"].forEach((id) => {
+    const element = $("#" + id);
+    if (!element) return;
+    element.addEventListener("input", updateBulkEditPanel);
+    element.addEventListener("change", updateBulkEditPanel);
+  });
   $("#previewArchiveButton")?.addEventListener("click", previewArchiveTargets);
   $("#archiveRecordsButton")?.addEventListener("click", archiveMatchingRecords);
   $("#unarchiveFilteredButton")?.addEventListener("click", () => unarchiveRecords(getFilteredRecords()));
@@ -3740,7 +3753,11 @@ function compareBySort(a, b) {
 function renderRecords() {
   const tbody = $("#recordsTable tbody");
   tbody.innerHTML = "";
-  getFilteredRecords().forEach((record) => {
+  const filteredRecords = getFilteredRecords();
+  pruneSelectedRecordIds();
+  updateBulkSelectionHeader(filteredRecords);
+  updateBulkEditPanel();
+  filteredRecords.forEach((record) => {
     const tr = document.createElement("tr");
     if (state.editingRecordId === record.id) {
       tr.className = "editing-row";
@@ -3750,6 +3767,12 @@ function renderRecords() {
     }
     tbody.appendChild(tr);
   });
+
+  tbody.onchange = (event) => {
+    const checkbox = event.target.closest('[data-record-select]');
+    if (!checkbox) return;
+    toggleRecordSelection(checkbox.dataset.recordSelect, checkbox.checked);
+  };
 
   tbody.onclick = (event) => {
     const button = event.target.closest("button");
@@ -3767,8 +3790,124 @@ function renderRecords() {
   };
 }
 
+function renderRecordSelectionCell(record) {
+  const checked = state.selectedRecordIds.has(record.id) ? " checked" : "";
+  return `<td class="select-cell"><input type="checkbox" data-record-select="${escapeHtml(record.id)}" aria-label="${escapeHtml(record.date)} ${escapeHtml(record.store)} ${escapeHtml(record.machine)} ${escapeHtml(record.unit)}番を選択"${checked}></td>`;
+}
+
+function getVisibleRecordIds() {
+  return getFilteredRecords().map((record) => record.id);
+}
+
+function pruneSelectedRecordIds() {
+  const existingIds = new Set(state.records.map((record) => record.id));
+  state.selectedRecordIds.forEach((id) => {
+    if (!existingIds.has(id)) state.selectedRecordIds.delete(id);
+  });
+}
+
+function clearSelectedRecordIds() {
+  state.selectedRecordIds.clear();
+  updateBulkEditPanel();
+}
+
+function toggleRecordSelection(id, selected) {
+  if (!id) return;
+  if (selected) state.selectedRecordIds.add(id);
+  else state.selectedRecordIds.delete(id);
+  updateBulkSelectionHeader(getFilteredRecords());
+  updateBulkEditPanel();
+}
+
+function updateBulkSelectionHeader(filteredRecords = getFilteredRecords()) {
+  const checkbox = $("#selectAllRecordsCheckbox");
+  if (!checkbox) return;
+  const visibleIds = filteredRecords.map((record) => record.id);
+  const selectedVisibleCount = visibleIds.filter((id) => state.selectedRecordIds.has(id)).length;
+  checkbox.checked = visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+  checkbox.indeterminate = selectedVisibleCount > 0 && selectedVisibleCount < visibleIds.length;
+  checkbox.disabled = visibleIds.length === 0;
+}
+
+function toggleAllVisibleRecords(selected) {
+  getVisibleRecordIds().forEach((id) => {
+    if (selected) state.selectedRecordIds.add(id);
+    else state.selectedRecordIds.delete(id);
+  });
+  renderRecords();
+}
+
+function updateBulkEditPanel() {
+  const count = state.selectedRecordIds.size;
+  const countLabel = $("#bulkEditSelectedCount");
+  if (countLabel) countLabel.textContent = `選択中：${count}件`;
+  const button = $("#bulkEditSelectedRecordsButton");
+  if (button) button.disabled = count === 0;
+}
+
+function getBulkEditInput() {
+  return {
+    shouldUpdateDate: Boolean($("#bulkEditDateEnabled")?.checked),
+    shouldUpdateStore: Boolean($("#bulkEditStoreEnabled")?.checked),
+    shouldUpdateMachine: Boolean($("#bulkEditMachineEnabled")?.checked),
+    newDate: $("#bulkEditDate")?.value || "",
+    newStore: $("#bulkEditStore")?.value.trim() || "",
+    newMachine: $("#bulkEditMachine")?.value.trim() || ""
+  };
+}
+
+async function bulkEditSelectedRecords() {
+  if (!ensureRecordsStorageReady()) return;
+  const selectedIds = new Set(state.selectedRecordIds);
+  const changedCount = selectedIds.size;
+  if (!changedCount) return alert("一括修正するデータを選択してください。");
+  const input = getBulkEditInput();
+  if (!input.shouldUpdateDate && !input.shouldUpdateStore && !input.shouldUpdateMachine) return alert("変更する項目を選択してください。");
+  if (input.shouldUpdateDate && !input.newDate) return alert("変更後の日付を入力してください。");
+  if (input.shouldUpdateStore && !input.newStore) return alert("変更後の店舗を入力してください。");
+  if (input.shouldUpdateMachine && !input.newMachine) return alert("変更後の機種を入力してください。");
+
+  const confirmed = confirm([
+    `選択中の${changedCount}件を一括修正します。`,
+    `日付：${input.shouldUpdateDate ? input.newDate : "変更なし"}`,
+    `店舗：${input.shouldUpdateStore ? input.newStore : "変更なし"}`,
+    `機種：${input.shouldUpdateMachine ? input.newMachine : "変更なし"}`,
+    "一括修正前にCSVバックアップをおすすめします。",
+    "よろしいですか？"
+  ].join("\n"));
+  if (!confirmed) return;
+
+  const previousRecords = state.records;
+  const now = new Date().toISOString();
+  state.records = state.records.map((record) => {
+    if (!selectedIds.has(record.id)) return record;
+    return hydrateRecord({
+      ...record,
+      date: input.shouldUpdateDate ? input.newDate : record.date,
+      store: input.shouldUpdateStore ? input.newStore : record.store,
+      machine: input.shouldUpdateMachine ? input.newMachine : record.machine,
+      updatedAt: now
+    });
+  });
+
+  try {
+    await saveRecords();
+  } catch (error) {
+    state.records = previousRecords;
+    console.error("選択データ一括修正保存エラー:", error);
+    alert(`一括修正の保存に失敗しました。\n${error.name}: ${error.message}`);
+    return;
+  }
+
+  if (input.shouldUpdateStore && input.newStore) saveStoreNameSilently(input.newStore);
+  clearSelectedRecordIds();
+  renderAll();
+  alert(`一括修正しました：${changedCount}件`);
+}
+
 function renderReadOnlyRecordRow(record) {
   return `
+    ${renderRecordSelectionCell(record)}
     <td>${escapeHtml(record.date)}</td>
     <td>${escapeHtml(record.store)}</td>
     <td>${escapeHtml(record.machine)}</td>
@@ -3808,6 +3947,7 @@ function renderDiffEditInput(record) {
 
 function renderEditableRecordRow(record) {
   return `
+    ${renderRecordSelectionCell(record)}
     <td><input type="date" data-edit-field="date" value="${escapeHtml(record.date)}"></td>
     <td><input data-edit-field="store" value="${escapeHtml(record.store)}"></td>
     <td><input data-edit-field="machine" value="${escapeHtml(record.machine)}"></td>
@@ -4094,6 +4234,12 @@ function renderSummaryRecords(records) {
     }
     tbody.appendChild(tr);
   });
+
+  tbody.onchange = (event) => {
+    const checkbox = event.target.closest('[data-record-select]');
+    if (!checkbox) return;
+    toggleRecordSelection(checkbox.dataset.recordSelect, checkbox.checked);
+  };
 
   tbody.onclick = (event) => {
     const button = event.target.closest("button");
