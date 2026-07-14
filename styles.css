@@ -1073,3 +1073,34 @@ button:disabled {
   color: #9b1c1c;
   font-weight: 700;
 }
+
+.select-cell {
+  text-align: center;
+  width: 42px;
+}
+
+.select-cell input[type="checkbox"] {
+  min-height: auto;
+  width: auto;
+}
+
+.bulk-edit-panel h3 {
+  margin: 0 0 6px;
+}
+
+.bulk-edit-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(150px, auto) minmax(180px, 1fr);
+}
+
+.selection-count {
+  color: var(--accent-strong);
+  font-weight: 800;
+}
+
+@media (max-width: 760px) {
+  .bulk-edit-grid {
+    grid-template-columns: 1fr;
+  }
+}
