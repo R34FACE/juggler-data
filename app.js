@@ -33,7 +33,7 @@ const state = {
   memoTags: loadMemoTags(),
   sort: { key: "date", direction: "desc" },
   analysisSelection: null,
-  ocrPreview: { files: [], settings: [], currentIndex: 0, image: null, mode: "tableOnly" },
+  ocrPreview: { files: [], settings: [], currentIndex: 0, image: null, mode: "fixedRows" },
   editingRecordId: null,
   recordsScopeIds: null,
   suppressRecordFilterClear: false,
@@ -1047,7 +1047,7 @@ function bindImageUploads() {
   $("#readBasicImagesButton").addEventListener("click", readBasicImages);
   $("#readGraphImagesButton").addEventListener("click", readGraphImages);
   $("#ocrPreviewFileSelect").addEventListener("change", (event) => selectOcrPreviewImage(Number(event.target.value)));
-  ["ocrTop", "ocrBottom", "ocrLeft", "ocrRight", "ocrRowCount"].forEach((id) => {
+  ["ocrRowCount"].forEach((id) => {
     $(`#${id}`).addEventListener("input", () => {
       saveCurrentOcrSettingsFromControls();
       renderOcrPreview();
@@ -1065,7 +1065,7 @@ function bindImageUploads() {
 }
 
 function getSelectedOcrMode() {
-  return $('input[name="ocrMode"]:checked')?.value === "tableOnly" ? "tableOnly" : "range";
+  return $('input[name="ocrMode"]:checked')?.value === "tableOnly" ? "tableOnly" : "fixedRows";
 }
 
 function updateOcrModeControls() {
@@ -1073,7 +1073,7 @@ function updateOcrModeControls() {
   state.ocrPreview.mode = mode;
   const isTableOnly = mode === "tableOnly";
   document.body.classList.toggle("ocr-table-only-mode", isTableOnly);
-  document.body.classList.toggle("ocr-range-mode", !isTableOnly);
+  document.body.classList.toggle("ocr-fixed-rows-mode", !isTableOnly);
   $$(".manual-ocr-controls").forEach((element) => {
     element.hidden = isTableOnly;
   });
@@ -1083,12 +1083,12 @@ function updateOcrModeControls() {
   if ($("#ocrModeHelp")) {
     $("#ocrModeHelp").textContent = isTableOnly
       ? "表だけ画像モードでは、画像全体を自動解析して5列固定でOCRします。範囲指定や行数入力は使いません。"
-      : "通常モードでは画像ごとに範囲と行数を変更できます。プレビューの緑枠内を5列×指定行数に固定分割して数字専用OCRします。";
+      : "画像全体を使用して、指定した行数に基づき5列固定で読み取ります。";
   }
 }
 
 function selectOcrMode(mode) {
-  const normalizedMode = mode === "range" ? "range" : "tableOnly";
+  const normalizedMode = mode === "tableOnly" ? "tableOnly" : "fixedRows";
   const input = $(`input[name="ocrMode"][value="${normalizedMode}"]`);
   if (input) input.checked = true;
   state.ocrPreview.mode = normalizedMode;
@@ -1107,7 +1107,7 @@ async function handleBasicImagesSelected() {
   state.ocrPreview.files = files;
   state.ocrPreview.settings = files.map(() => defaultOcrRangeSettings());
   state.ocrPreview.currentIndex = 0;
-  if (files.length) selectOcrMode("tableOnly");
+  if (files.length) selectOcrMode("fixedRows");
   $("#ocrPreviewPanel").hidden = !files.length;
   $("#ocrPreviewFileSelect").innerHTML = files.map((file, index) => `<option value="${index}">${index + 1}. ${escapeHtml(file.name)}</option>`).join("");
   if (files.length) await selectOcrPreviewImage(0);
@@ -1118,7 +1118,7 @@ async function handleBasicImagesSelected() {
 }
 
 function defaultOcrRangeSettings() {
-  return { top: 8, bottom: 96, left: 3, right: 97, rows: 19 };
+  return { rows: 19 };
 }
 
 async function selectOcrPreviewImage(index) {
@@ -1136,21 +1136,12 @@ function getOcrRangeSettings(index) {
 }
 
 function loadOcrSettingsToControls(settings) {
-  $("#ocrTop").value = settings.top;
-  $("#ocrBottom").value = settings.bottom;
-  $("#ocrLeft").value = settings.left;
-  $("#ocrRight").value = settings.right;
   $("#ocrRowCount").value = settings.rows;
-  updateOcrRangeLabels(settings);
 }
 
 function saveCurrentOcrSettingsFromControls() {
   const index = state.ocrPreview.currentIndex;
   const settings = normalizeOcrRangeSettings({
-    top: numberValue($("#ocrTop").value),
-    bottom: numberValue($("#ocrBottom").value),
-    left: numberValue($("#ocrLeft").value),
-    right: numberValue($("#ocrRight").value),
     rows: numberValue($("#ocrRowCount").value)
   });
   state.ocrPreview.settings[index] = settings;
@@ -1159,22 +1150,9 @@ function saveCurrentOcrSettingsFromControls() {
 
 function normalizeOcrRangeSettings(settings) {
   const normalized = {
-    top: clamp(settings.top, 0, 95),
-    bottom: clamp(settings.bottom, 5, 100),
-    left: clamp(settings.left, 0, 95),
-    right: clamp(settings.right, 5, 100),
     rows: Math.round(clamp(settings.rows || 19, 1, 60))
   };
-  if (normalized.bottom - normalized.top < 5) normalized.bottom = Math.min(100, normalized.top + 5);
-  if (normalized.right - normalized.left < 5) normalized.right = Math.min(100, normalized.left + 5);
   return normalized;
-}
-
-function updateOcrRangeLabels(settings) {
-  $("#ocrTopValue").textContent = `${settings.top}%`;
-  $("#ocrBottomValue").textContent = `${settings.bottom}%`;
-  $("#ocrLeftValue").textContent = `${settings.left}%`;
-  $("#ocrRightValue").textContent = `${settings.right}%`;
 }
 
 function renderOcrPreview() {
@@ -1195,42 +1173,6 @@ function renderOcrPreview() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
 
-  const settings = getOcrRangeSettings(state.ocrPreview.currentIndex);
-  updateOcrRangeLabels(settings);
-  if (getSelectedOcrMode() === "tableOnly") return;
-
-  const rect = settingsToCanvasRect(settings, canvas.width, canvas.height);
-  ctx.save();
-  ctx.fillStyle = tableOnly ? "rgba(53, 111, 197, 0.10)" : "rgba(34, 125, 104, 0.12)";
-  ctx.strokeStyle = tableOnly ? "#356fc5" : "#1b8f72";
-  ctx.lineWidth = 2;
-  ctx.fillRect(rect.left, rect.top, rect.width, rect.height);
-  ctx.strokeRect(rect.left, rect.top, rect.width, rect.height);
-  ctx.strokeStyle = tableOnly ? "rgba(53, 111, 197, 0.62)" : "rgba(27, 143, 114, 0.72)";
-  ctx.lineWidth = 1;
-  for (let col = 1; col < 5; col += 1) {
-    const x = rect.left + (rect.width * col) / 5;
-    ctx.beginPath();
-    ctx.moveTo(x, rect.top);
-    ctx.lineTo(x, rect.top + rect.height);
-    ctx.stroke();
-  }
-  for (let row = 1; row < previewRows; row += 1) {
-    const y = rect.top + (rect.height * row) / previewRows;
-    ctx.beginPath();
-    ctx.moveTo(rect.left, y);
-    ctx.lineTo(rect.left + rect.width, y);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function settingsToCanvasRect(settings, width, height) {
-  const left = (settings.left / 100) * width;
-  const right = (settings.right / 100) * width;
-  const top = (settings.top / 100) * height;
-  const bottom = (settings.bottom / 100) * height;
-  return { left, top, width: right - left, height: bottom - top };
 }
 
 function clamp(value, min, max) {
@@ -1255,7 +1197,7 @@ async function readBasicImages() {
   let added = 0;
   try {
     if (!tableOnlyMode) saveCurrentOcrSettingsFromControls();
-    updateUploadStatus(tableOnlyMode ? "表だけ画像を自動OCR読み取り中です..." : "指定した表範囲をOCR読み取り中です...");
+    updateUploadStatus(tableOnlyMode ? "表だけ画像を自動OCR読み取り中です..." : "画像全体を指定行数でOCR読み取り中です...");
     for (const [index, file] of files.entries()) {
       const imageNumber = `${index + 1}/${files.length}枚目`;
       let rows = [];
@@ -1264,13 +1206,8 @@ async function readBasicImages() {
         rows = await recognizeBasicDataTableOnlyImage(file, imageNumber);
       } else {
         const settings = getOcrRangeSettings(index);
-        updateUploadStatus(`指定範囲を5列×${settings.rows}行に分割中です（${imageNumber}）...`);
+        updateUploadStatus(`画像全体を5列×${settings.rows}行に分割中です（${imageNumber}）...`);
         rows = await recognizeBasicDataTableImage(file, imageNumber, settings);
-        if (!rows.length) {
-          updateUploadStatus(`表分割で抽出できなかったため、従来OCRへ切り替えます（${imageNumber}）...`);
-          const ocrResults = await recognizeBasicDataImage(file, imageNumber);
-          rows = parseBasicDataText(ocrResults.map((result) => result.text).join("\n"));
-        }
       }
       if (rows.length && added === 0 && isDraftTableEmpty()) $("#draftTable tbody").innerHTML = "";
       rows.forEach((row) => addDraftRow(row));
@@ -1278,15 +1215,15 @@ async function readBasicImages() {
     }
     if (added) {
       if (tableOnlyMode) {
-        const fewRowsMessage = added < 3 ? " 抽出件数が少ないため範囲指定モードも試してください。" : "";
+        const fewRowsMessage = added < 3 ? " 抽出件数が少ない場合は行数指定モードも試してください。" : "";
         updateUploadStatus(`表だけ画像モードで${added}台を読み取りました。合算は保存時にBB+RBから再計算します。${fewRowsMessage}要確認の行は保存前に修正してください。`);
       } else {
-        updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。指定範囲を5列固定で読み取り、合算はBB+RBから再計算しています。要確認の行は保存前に修正してください。`);
+        updateUploadStatus(`${files.length}枚の基本データ画像から${added}台を表へ入力しました。画像全体を指定行数×5列で読み取り、合算はBB+RBから再計算しています。要確認の行は保存前に修正してください。`);
       }
     } else if (tableOnlyMode) {
-      updateUploadStatus("表だけ画像として読み取りましたが、抽出件数が少ないため範囲指定モードも試してください。手動入力も利用できます。");
+      updateUploadStatus("表だけ画像として読み取りましたが、抽出できませんでした。行数指定モードまたは手動入力をお試しください。");
     } else {
-      updateUploadStatus("OCRは完了しましたが、台番・累計G・BB・RBを抽出できませんでした。プレビューで表の外枠・行数を調整して再実行するか、手動入力してください。");
+      updateUploadStatus("OCRは完了しましたが、台番・累計G・BB・RBを抽出できませんでした。行数を確認して再実行するか、手動入力してください。");
     }
   } catch (error) {
     console.error(error);
@@ -2385,9 +2322,9 @@ function clearBasicOcrState() {
   state.ocrPreview.settings = [];
   state.ocrPreview.currentIndex = 0;
   state.ocrPreview.image = null;
-  state.ocrPreview.mode = "tableOnly";
+  state.ocrPreview.mode = "fixedRows";
 
-  if (typeof selectOcrMode === "function") selectOcrMode("tableOnly");
+  if (typeof selectOcrMode === "function") selectOcrMode("fixedRows");
   if (typeof renderOcrPreview === "function") renderOcrPreview();
 }
 
@@ -2471,24 +2408,27 @@ function drawDebugBadge(ctx, label, x, y, color) {
 }
 
 async function recognizeBasicDataTableImage(file, imageNumber, settings) {
-  updateUploadStatus(`指定範囲を補正中です（${imageNumber}）...`);
+  updateUploadStatus(`画像全体を補正中です（${imageNumber}）...`);
   const rangeSettings = normalizeOcrRangeSettings(settings || defaultOcrRangeSettings());
   const bitmap = await loadImageBitmap(file);
   const source = drawScaledImage(bitmap, { scale: 2.8 });
-  const tableCanvas = cropTableRangeCanvas(source, rangeSettings);
-  const rawTableCanvas = cropTableRangeCanvas(source, rangeSettings, { enhance: false });
+  const tableCanvas = cropWholeTableCanvas(source);
+  const rawTableCanvas = cropWholeTableCanvas(source, { enhance: false });
   const cells = buildFixedGridCells(tableCanvas, rangeSettings.rows, 5);
   const rows = [];
 
   for (let rowIndex = 0; rowIndex < rangeSettings.rows; rowIndex += 1) {
     const rowCells = cells.slice(rowIndex * 5, rowIndex * 5 + 5);
-    updateUploadStatus(`指定範囲セルを数字専用OCRで読み取り中です（${imageNumber} / ${rowIndex + 1}/${rangeSettings.rows}行）...`);
+    updateUploadStatus(`画像全体のセルを数字専用OCRで読み取り中です（${imageNumber} / ${rowIndex + 1}/${rangeSettings.rows}行）...`);
     const cellResults = await Promise.all(rowCells.map((cell, columnIndex) => {
       const label = `${imageNumber} 行${rowIndex + 1} 列${columnIndex + 1}`;
       return columnIndex === 0 ? recognizeUnitCell(rawTableCanvas, cell, label) : recognizeNumericCell(tableCanvas, cell, label);
     }));
     const row = buildOcrRowFromCells(cellResults, rowIndex);
-    if (row) rows.push(row);
+    if (row) {
+      row.memo = `${row.memo} / 行数指定モード`;
+      rows.push(row);
+    }
   }
 
   return dedupeOcrRows(rows);
