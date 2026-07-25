@@ -638,7 +638,6 @@ button:disabled {
 }
 
 .manual-ocr-controls[hidden],
-.ocr-range-controls[hidden],
 .table-only-hint[hidden] {
   display: none !important;
 }
@@ -647,13 +646,13 @@ button:disabled {
   display: none !important;
 }
 
-.ocr-range-mode .manual-ocr-controls {
+.ocr-fixed-rows-mode .manual-ocr-controls {
   display: grid;
 }
 
 .ocr-controls,
 .manual-ocr-controls,
-.ocr-range-controls {
+.ocr-row-controls {
   display: grid;
   gap: 10px;
 }

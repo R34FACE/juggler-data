@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ジャグラーデータ管理</title>
-  <link rel="manifest" href="manifest.json?v=22">
+  <link rel="manifest" href="manifest.json?v=23">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css?v=22">
+  <link rel="stylesheet" href="styles.css?v=23">
 </head>
 <body>
   <header class="app-header">
@@ -98,7 +98,7 @@
         <label class="upload-box">
           <span>基本データ画像</span>
           <input type="file" id="basicImage" accept="image/*" multiple>
-          <small>通常スクショは範囲指定、表だけに切り抜いた画像は画像全体を自動検出してOCRできます。</small>
+          <small>表だけに切り抜いた画像を、行の自動判定または指定した行数でOCRできます。</small>
         </label>
         <label class="upload-box">
           <span>グラフ画像</span>
@@ -110,7 +110,7 @@
       <section class="ocr-preview-panel" id="ocrPreviewPanel" hidden>
         <div class="section-head compact-head">
           <h3>基本データOCRモード</h3>
-          <p>通常スクショは範囲を指定し、表だけ画像は画像全体から行・列を自動検出して読み取ります。列は「台番 / 累計ゲーム / BB / RB / 合算」に固定です。</p>
+          <p>画像全体を使い、行の自動判定または指定した行数で読み取ります。列は「台番 / 累計ゲーム / BB / RB / 合算」の5列固定です。</p>
         </div>
         <div class="ocr-preview-layout">
           <div class="ocr-canvas-wrap">
@@ -119,36 +119,24 @@
           <div class="ocr-controls">
             <fieldset class="ocr-mode-field">
               <legend>読み取りモード</legend>
-              <label><input type="radio" name="ocrMode" value="tableOnly" checked> 表だけ画像モード（画像全体を自動検出）</label>
-              <label><input type="radio" name="ocrMode" value="range"> 通常モード（範囲指定あり）</label>
+              <label><input type="radio" name="ocrMode" value="tableOnly"> 表だけ画像モード（自動行判定）</label>
+              <label><input type="radio" name="ocrMode" value="fixedRows" checked> 行数指定モード（画像全体を使用）</label>
             </fieldset>
             <div class="table-only-hint" id="tableOnlyHint">
               <strong>表だけ画像モードで読み取ります。</strong>
               <p>表だけに切り抜いた画像はそのままOCRできます。範囲指定や行数入力は不要です。画像全体を自動解析します。</p>
             </div>
-            <div class="manual-ocr-controls" id="manualOcrControls" hidden>
+            <div class="manual-ocr-controls" id="manualOcrControls">
               <label>調整する画像
                 <select id="ocrPreviewFileSelect"></select>
               </label>
-              <div class="ocr-range-controls" id="ocrRangeControls">
-                <label class="manual-ocr-row-count">行数
+              <div class="ocr-row-controls">
+                <label>行数
                   <input type="number" id="ocrRowCount" min="1" max="60" value="19">
-                </label>
-                <label>上端 <span id="ocrTopValue">8%</span>
-                  <input type="range" id="ocrTop" min="0" max="95" value="8">
-                </label>
-                <label>下端 <span id="ocrBottomValue">96%</span>
-                  <input type="range" id="ocrBottom" min="5" max="100" value="96">
-                </label>
-                <label>左端 <span id="ocrLeftValue">3%</span>
-                  <input type="range" id="ocrLeft" min="0" max="95" value="3">
-                </label>
-                <label>右端 <span id="ocrRightValue">97%</span>
-                  <input type="range" id="ocrRight" min="5" max="100" value="97">
                 </label>
               </div>
             </div>
-            <p class="muted" id="ocrModeHelp">表だけ画像モードでは、画像全体を自動解析して5列固定でOCRします。</p>
+            <p class="muted" id="ocrModeHelp">画像全体を使用して、指定した行数に基づいて読み取ります。</p>
           </div>
         </div>
       </section>
@@ -655,6 +643,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js?v=22"></script>
+  <script src="app.js?v=23"></script>
 </body>
 </html>
