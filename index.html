@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ジャグラーデータ管理</title>
-  <link rel="manifest" href="manifest.json?v=23">
+  <link rel="manifest" href="manifest.json?v=24">
   <meta name="theme-color" content="#008b76">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="ジャグラーデータ管理">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon.svg">
-  <link rel="stylesheet" href="styles.css?v=23">
+  <link rel="stylesheet" href="styles.css?v=24">
 </head>
 <body>
   <header class="app-header">
@@ -304,11 +304,17 @@
         <button id="exportLatestRecordsButton" type="button">最新版CSV出力</button>
         <button class="secondary" id="exportDatedRecordsButton" type="button">日付付きCSV出力</button>
         <button class="secondary" id="reevaluateRecordsButton" type="button">保存済みデータを再判定</button>
+        <button class="secondary" id="restoreEvaluationBackupButton" type="button">再判定前へ戻す</button>
         <button class="secondary" id="compactRecordsButton" type="button">保存データを軽量化</button>
         <button class="secondary" id="inspectRecordsStorageButton" type="button">保存データを復旧</button>
         <label class="file-button">CSV取込<input type="file" id="importRecordsInput" accept=".csv,text/csv"></label>
         <label class="file-button">JSON復元<input type="file" id="importRecordsJsonInput" accept=".json,application/json"></label>
         <button class="danger subtle" id="deleteAllRecordsButton" type="button">全削除</button>
+      </div>
+      <div class="evaluation-policy-panel">
+        <strong>Ver.24 評価基準</strong>
+        <p>A：設定4以上期待度70%以上（6000G以上は60%以上）／B：35%以上／C：35%未満／1000G未満・マスター不足：要確認</p>
+        <p>BB・RBと回転数から機種別に算出し、差枚は評価へ加点しません。機種マスター不足時はREG・合算の共通基準で暫定評価します。再判定時は現在の全データを自動バックアップします。</p>
       </div>
       <div class="storage-recovery-panel" id="recordsRecoveryStatus">保存データ復旧ボタンでIndexedDB・旧localStorage・移行バックアップの件数を確認できます。</div>
       <div class="storage-recovery-panel emergency-rescue-panel">
@@ -643,6 +649,6 @@
   </template>
 
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-  <script src="app.js?v=23"></script>
+  <script src="app.js?v=24"></script>
 </body>
 </html>

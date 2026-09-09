@@ -22,9 +22,12 @@ const INITIAL_MEMO_TAGS = [
 const INITIAL_MASTERS = loadJson(STORAGE_KEYS.masters, []);
 
 const RECORDS_DB_NAME = "jugglerDataDb";
-const RECORDS_DB_VERSION = 1;
+const RECORDS_DB_VERSION = 2;
 const RECORDS_STORE_NAME = "records";
+const EVALUATION_BACKUP_STORE_NAME = "evaluationBackups";
 const MIGRATED_RECORDS_BACKUP_KEY = `${STORAGE_KEYS.records}.backupMigrated`;
+const EVALUATION_VERSION = "v24-bayes-2026-09";
+const LEGACY_EVALUATION_VERSION = "v23-score";
 
 const state = {
   records: [],
@@ -115,6 +118,10 @@ function compactRecordForStorage(record) {
     archivedAt: record.archivedAt || undefined
   };
 
+  ["rating", "expectation", "confidence", "reason", "nearestSettings", "evaluationVersion", "evaluatedAt", "evaluationHistory"].forEach((key) => {
+    if (record[key] !== undefined && record[key] !== null && record[key] !== "") compact[key] = record[key];
+  });
+
   Object.keys(compact).forEach((key) => {
     if (compact[key] === undefined || compact[key] === null || compact[key] === "") {
       delete compact[key];
@@ -133,15 +140,25 @@ function hydrateRecord(record) {
   let evaluation = {};
 
   try {
-    evaluation = evaluateRecord({
+    evaluation = record.evaluationVersion
+      ? {
+          rating: record.rating,
+          expectation: record.expectation,
+          confidence: record.confidence,
+          reason: record.reason,
+          nearestSettings: record.nearestSettings
+        }
+      : evaluateRecordLegacy({
       ...record,
       games,
       bb,
       rb,
       diff,
-      ...rates,
+      bbRate: rates.bb,
+      rbRate: rates.rb,
+      totalRate: rates.total,
       machine: record.machine
-    });
+        });
   } catch (error) {
     console.warn("保存データの再判定を後回しにしました:", error);
   }
@@ -159,7 +176,9 @@ function hydrateRecord(record) {
     expectation: evaluation.expectation || record.expectation || 0,
     confidence: evaluation.confidence || record.confidence || "低",
     reason: evaluation.reason || record.reason || "手動入力データです。",
-    nearestSettings: evaluation.nearestSettings || record.nearestSettings || "-"
+    nearestSettings: evaluation.nearestSettings || record.nearestSettings || "-",
+    evaluationVersion: record.evaluationVersion || LEGACY_EVALUATION_VERSION,
+    evaluationHistory: Array.isArray(record.evaluationHistory) ? record.evaluationHistory : []
   };
 }
 
@@ -180,11 +199,41 @@ function openRecordsDb() {
       if (!db.objectStoreNames.contains(RECORDS_STORE_NAME)) {
         db.createObjectStore(RECORDS_STORE_NAME, { keyPath: "id" });
       }
+      if (!db.objectStoreNames.contains(EVALUATION_BACKUP_STORE_NAME)) {
+        db.createObjectStore(EVALUATION_BACKUP_STORE_NAME, { keyPath: "id" });
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error || new Error("IndexedDBを開けませんでした。"));
     request.onblocked = () => reject(new Error("IndexedDBの更新がブロックされました。ほかのタブを閉じて再読み込みしてください。"));
   });
+}
+
+function withEvaluationBackupStore(mode, callback) {
+  return openRecordsDb().then((db) => new Promise((resolve, reject) => {
+    const transaction = db.transaction(EVALUATION_BACKUP_STORE_NAME, mode);
+    const store = transaction.objectStore(EVALUATION_BACKUP_STORE_NAME);
+    let callbackResult;
+    transaction.oncomplete = () => { db.close(); resolve(callbackResult); };
+    transaction.onerror = () => { const error = transaction.error || new Error("評価バックアップの処理に失敗しました。"); db.close(); reject(error); };
+    transaction.onabort = transaction.onerror;
+    try { callbackResult = callback(store); } catch (error) { transaction.abort(); reject(error); }
+  }));
+}
+
+function saveEvaluationBackup(records) {
+  const createdAt = new Date().toISOString();
+  return withEvaluationBackupStore("readwrite", (store) => {
+    store.put({ id: "latest", createdAt, records: records.map(compactRecordForStorage) });
+  }).then(() => createdAt);
+}
+
+function loadLatestEvaluationBackup() {
+  return withEvaluationBackupStore("readonly", (store) => new Promise((resolve, reject) => {
+    const request = store.get("latest");
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error("評価バックアップを読み込めませんでした。"));
+  }));
 }
 
 function withRecordsStore(mode, callback) {
@@ -408,7 +457,7 @@ function ensureRecordsStorageReady() {
 }
 
 function setRecordsStorageActionsDisabled(disabled) {
-  ["#saveDraftButton", "#deleteAllRecordsButton", "#compactRecordsButton", "#importRecordsInput", "#importRecordsJsonInput", "#archiveRecordsButton", "#unarchiveFilteredButton", "#deleteFilteredRecordsButton", "#reevaluateRecordsButton"].forEach((selector) => {
+  ["#saveDraftButton", "#deleteAllRecordsButton", "#compactRecordsButton", "#importRecordsInput", "#importRecordsJsonInput", "#archiveRecordsButton", "#unarchiveFilteredButton", "#deleteFilteredRecordsButton", "#reevaluateRecordsButton", "#restoreEvaluationBackupButton"].forEach((selector) => {
     const element = $(selector);
     if (element) element.disabled = disabled;
   });
@@ -3285,7 +3334,7 @@ function updateDraftRow(row) {
   $(".bb-rate", row).textContent = rates.bbText;
   $(".rb-rate", row).textContent = rates.rbText;
   $(".total-rate", row).textContent = rates.totalText;
-  const evaluation = evaluateRecord({ ...data, ...rates, machine: $("#machineInput").value.trim() });
+  const evaluation = evaluateRecord({ ...data, bbRate: rates.bb, rbRate: rates.rb, totalRate: rates.total, machine: $("#machineInput").value.trim() });
   $(".rating-cell", row).innerHTML = ratingPill(evaluation.rating);
   if (!data.ocrStatus) setOcrStatusCell($(".ocr-check", row), "手動", "");
   row.dataset.evaluation = JSON.stringify(evaluation);
@@ -3352,6 +3401,8 @@ async function saveDraftRows() {
 
   try {
     const newRecords = rows.map(({ data }) => {
+      const rates = calculateRates(data.games, data.bb, data.rb);
+      const evaluation = evaluateRecord({ ...data, bbRate: rates.bb, rbRate: rates.rb, totalRate: rates.total, machine });
       return {
         id: uid("record"),
         date,
@@ -3369,7 +3420,14 @@ async function saveDraftRows() {
             : "",
           data.memo
         ].filter(Boolean).join(" / "),
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        rating: evaluation.rating,
+        expectation: evaluation.expectation,
+        confidence: evaluation.confidence,
+        reason: evaluation.reason,
+        nearestSettings: evaluation.nearestSettings,
+        evaluationVersion: EVALUATION_VERSION,
+        evaluatedAt: new Date().toISOString()
       };
     });
 
@@ -3596,6 +3654,7 @@ function bindRecords() {
   $("#exportLatestRecordsButton").addEventListener("click", () => exportRecordsCsv("slot-records_latest.csv"));
   $("#exportDatedRecordsButton").addEventListener("click", () => exportRecordsCsv(`slot-records_${formatLocalDate(new Date())}.csv`));
   $("#reevaluateRecordsButton").addEventListener("click", reevaluateSavedRecords);
+  $("#restoreEvaluationBackupButton")?.addEventListener("click", restoreLatestEvaluationBackup);
   $("#inspectRecordsStorageButton")?.addEventListener("click", inspectRecordsForRecovery);
   $("#compactRecordsButton")?.addEventListener("click", compactExistingSavedRecords);
   $("#importRecordsInput").addEventListener("change", (event) => importRecordsCsv(event.target.files[0]));
@@ -3947,7 +4006,14 @@ async function saveRecordFromRow(id, row) {
   }
 
   const rates = calculateRates(updated.games, updated.bb, updated.rb);
-  const evaluation = evaluateRecord({ ...updated, ...rates });
+  const evaluation = evaluateRecord({ ...updated, bbRate: rates.bb, rbRate: rates.rb, totalRate: rates.total });
+  const evaluationHistory = [...(Array.isArray(original.evaluationHistory) ? original.evaluationHistory : []), {
+    version: original.evaluationVersion || LEGACY_EVALUATION_VERSION,
+    rating: normalizeRatingLabel(original.rating),
+    expectation: Number(original.expectation || 0),
+    reason: original.reason || "",
+    evaluatedAt: original.evaluatedAt || original.updatedAt || original.createdAt || ""
+  }].slice(-5);
   Object.assign(updated, {
     bbRate: rates.bb,
     rbRate: rates.rb,
@@ -3957,6 +4023,9 @@ async function saveRecordFromRow(id, row) {
     confidence: evaluation.confidence || "低",
     reason: evaluation.reason || "手動入力データです。",
     nearestSettings: evaluation.nearestSettings || "-",
+    evaluationVersion: EVALUATION_VERSION,
+    evaluatedAt: new Date().toISOString(),
+    evaluationHistory,
     updatedAt: new Date().toISOString()
   });
 
@@ -5175,6 +5244,75 @@ function evaluateRecord(record) {
   if (!record.games || record.games < 1000) {
     return {
       rating: "要確認",
+      expectation: 0,
+      confidence: "低",
+      reason: "1000G未満のため判定対象外です。",
+      nearestSettings: "-"
+    };
+  }
+
+  const master = findMachineMaster(record.machine);
+  if (!record.bbRate || !record.rbRate) {
+    return {
+      rating: "要確認",
+      expectation: 0,
+      confidence: record.games >= 6000 ? "高" : record.games >= 3000 ? "中" : "低",
+      reason: "BB・RBデータが不足しているため判定できません。",
+      nearestSettings: "-"
+    };
+  }
+
+  if (!isCompleteMachineMaster(master)) {
+    const strong = record.games >= 3000 && record.rbRate <= 300 && record.totalRate && record.totalRate <= 140;
+    const candidate = record.rbRate <= 360 && record.totalRate && record.totalRate <= 155;
+    return {
+      rating: strong ? "A" : candidate ? "B" : "C",
+      expectation: strong ? 70 : candidate ? 40 : 20,
+      confidence: record.games >= 6000 ? "高" : record.games >= 3000 ? "中" : "低",
+      reason: "機種マスターが未登録または不完全なため、REG・合算の共通基準で暫定評価しています。差枚は判定に使用していません。",
+      nearestSettings: "-"
+    };
+  }
+
+  const games = Number(record.games);
+  const bb = Number(record.bb || 0);
+  const rb = Number(record.rb || 0);
+  const other = Math.max(0, games - bb - rb);
+  const candidates = [1, 2, 3, 4, 5, 6].map((setting) => {
+    const data = master.settings[setting];
+    const pBb = 1 / Number(data.big);
+    const pRb = 1 / Number(data.reg);
+    const pOther = Math.max(1e-9, 1 - pBb - pRb);
+    const logLikelihood = bb * Math.log(pBb) + rb * Math.log(pRb) + other * Math.log(pOther);
+    return { setting, logLikelihood };
+  });
+  const maxLog = Math.max(...candidates.map((item) => item.logLikelihood));
+  const weighted = candidates.map((item) => ({ ...item, weight: Math.exp(item.logLikelihood - maxLog) }));
+  const weightTotal = weighted.reduce((sum, item) => sum + item.weight, 0) || 1;
+  const posterior = weighted.map((item) => ({ ...item, probability: item.weight / weightTotal }));
+  const highProbability = posterior.filter((item) => item.setting >= 4).reduce((sum, item) => sum + item.probability, 0);
+  const probabilityPercent = Math.round(highProbability * 100);
+  const sorted = [...posterior].sort((a, b) => b.probability - a.probability);
+  const nearestSettings = sorted.slice(0, 2).map((item) => `設定${item.setting}`).join("〜");
+  const confidence = games >= 6000 ? "高" : games >= 3000 ? "中" : "低";
+
+  let rating = "C";
+  if ((games >= 3000 && probabilityPercent >= 70) || (games >= 6000 && probabilityPercent >= 60)) rating = "A";
+  else if (probabilityPercent >= 35) rating = "B";
+
+  return {
+    rating,
+    expectation: probabilityPercent,
+    confidence,
+    reason: `BB・RBから算出した設定4以上期待度は${probabilityPercent}%です。差枚は判定に使用していません。`,
+    nearestSettings
+  };
+}
+
+function evaluateRecordLegacy(record) {
+  if (!record.games || record.games < 1000) {
+    return {
+      rating: "要確認",
       expectation: 20,
       confidence: "低",
       reason: "回転数が少ないため参考評価です。",
@@ -5303,6 +5441,15 @@ const RATING_LABELS = ["A", "B", "C", "要確認"];
 function buildReevaluatedRecord(record) {
   const rates = calculateRates(record.games, record.bb, record.rb);
   const evaluation = evaluateRecord({ ...record, bbRate: rates.bb, rbRate: rates.rb, totalRate: rates.total });
+  const evaluatedAt = new Date().toISOString();
+  const previousEvaluation = {
+    version: record.evaluationVersion || LEGACY_EVALUATION_VERSION,
+    rating: normalizeRatingLabel(record.rating),
+    expectation: Number(record.expectation || 0),
+    reason: record.reason || "",
+    evaluatedAt: record.evaluatedAt || record.updatedAt || record.createdAt || ""
+  };
+  const history = [...(Array.isArray(record.evaluationHistory) ? record.evaluationHistory : []), previousEvaluation].slice(-5);
   return {
     ...record,
     bbRate: rates.bb,
@@ -5312,7 +5459,10 @@ function buildReevaluatedRecord(record) {
     expectation: evaluation.expectation ?? 0,
     confidence: evaluation.confidence || "低",
     reason: evaluation.reason || "",
-    nearestSettings: evaluation.nearestSettings || "-"
+    nearestSettings: evaluation.nearestSettings || "-",
+    evaluationVersion: EVALUATION_VERSION,
+    evaluatedAt,
+    evaluationHistory: history
   };
 }
 
@@ -5325,13 +5475,8 @@ function normalizeRatingLabel(rating) {
 }
 
 function refreshRecordEvaluations() {
-  let changed = false;
-  state.records = state.records.map((record) => {
-    const updated = buildReevaluatedRecord(record);
-    changed = changed || hasReevaluationChange(record, updated);
-    return updated;
-  });
-  if (changed) refreshStorageStatus();
+  state.records = state.records.map(hydrateRecord);
+  refreshStorageStatus();
 }
 
 async function reevaluateSavedRecords() {
@@ -5344,7 +5489,8 @@ async function reevaluateSavedRecords() {
 
   const confirmed = confirm([
     `保存済みデータ${total}件を最新ロジックで再判定します。よろしいですか？`,
-    "再判定前にCSVバックアップをおすすめします。",
+    "再判定前の状態は端末内へ自動バックアップします。",
+    "新基準はBB・RBと回転数を使い、差枚は判定に使用しません。",
     "台番号、日付、店舗、機種、G数、BB、RB、差枚、メモは変更しません。"
   ].join("\n"));
   if (!confirmed) return;
@@ -5353,6 +5499,13 @@ async function reevaluateSavedRecords() {
   const ratingCounts = Object.fromEntries(RATING_LABELS.map((label) => [label, 0]));
   const transitions = {};
   let changedCount = 0;
+
+  try {
+    await saveEvaluationBackup(previousRecords);
+  } catch (error) {
+    alert(`安全バックアップを作成できなかったため、再判定を中止しました。\n${error.name}: ${error.message}`);
+    return;
+  }
 
   state.records = state.records.map((record) => {
     const updated = buildReevaluatedRecord(record);
@@ -5387,6 +5540,22 @@ async function reevaluateSavedRecords() {
     : "判定変更：なし";
 
   alert(`再判定完了：${ratingSummary}\n判定項目更新：${changedCount}件\n${transitionSummary}`);
+}
+
+async function restoreLatestEvaluationBackup() {
+  if (!ensureRecordsStorageReady()) return;
+  try {
+    const backup = await loadLatestEvaluationBackup();
+    if (!backup?.records?.length) return alert("復元できる再判定前バックアップがありません。");
+    if (!confirm(`${backup.records.length}件を再判定前（${new Date(backup.createdAt).toLocaleString("ja-JP")}）の状態へ戻しますか？`)) return;
+    const previousRecords = state.records;
+    state.records = hydrateRecords(backup.records);
+    try { await saveRecords(); } catch (error) { state.records = previousRecords; throw error; }
+    renderAll();
+    alert(`再判定前の状態へ復元しました：${state.records.length}件`);
+  } catch (error) {
+    alert(`再判定前バックアップの復元に失敗しました。\n${error.name}: ${error.message}`);
+  }
 }
 
 

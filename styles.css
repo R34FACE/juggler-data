@@ -1058,6 +1058,20 @@ button:disabled {
   margin-top: 8px;
 }
 
+.evaluation-policy-panel {
+  margin: 14px 0;
+  padding: 14px 16px;
+  border: 1px solid rgba(0, 139, 118, 0.35);
+  border-left: 4px solid #008b76;
+  border-radius: 12px;
+  background: rgba(0, 139, 118, 0.08);
+  line-height: 1.65;
+}
+
+.evaluation-policy-panel p {
+  margin: 6px 0 0;
+}
+
 .emergency-rescue-panel h3 {
   margin-top: 0;
 }
